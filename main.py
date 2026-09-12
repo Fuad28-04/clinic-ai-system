@@ -1,0 +1,384 @@
+import os
+import httpx
+from datetime import datetime
+from fastapi import FastAPI, Request, Response
+from pydantic import BaseModel
+from dotenv import load_dotenv
+from supabase import create_client
+from google import genai
+from google.genai import types
+
+# loading secret keys from .env file
+load_dotenv()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# whatsapp cloud api credentials
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
+
+# setting up Gemini AI (new SDK, old google.generativeai package is deprecated now)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+GEMINI_MODEL_NAME = "gemini-3.6-flash"
+
+# connecting to Supabase database
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# creating the FastAPI app
+app = FastAPI()
+
+
+@app.get("/")
+def home():
+    """just to check if the server is running or not"""
+    return {"message": "Clinic AI Backend is running!"}
+
+
+@app.get("/test-database")
+def test_database():
+    """testing if supabase connection is working properly"""
+    try:
+        result = supabase.table("doctors").select("*").execute()
+        return {
+            "status": "success",
+            "message": "Database connection is working",
+            "doctors": result.data
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/test-ai")
+def test_ai():
+    """testing if gemini ai is responding properly"""
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL_NAME,
+            contents="Are you working properly? Reply in one short line."
+        )
+        return {
+            "status": "success",
+            "message": "Gemini AI connection is working",
+            "ai_response": response.text
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ==========================================================
+# TOOL FUNCTIONS - these are the "actions" the AI can take
+# the AI itself decides when to call these based on the conversation
+# Gemini reads the docstring + type hints to understand what each tool does
+# ==========================================================
+
+def get_all_doctors() -> list:
+    """Get the list of all active doctors in the clinic, including their name, specialty, and fee.
+    Use this when the patient asks which doctors are available or wants to know about specialties.
+    """
+    result = supabase.table("doctors").select("*").eq("is_active", True).execute()
+    return result.data
+
+
+def check_doctor_schedule(doctor_name: str) -> dict:
+    """Get the schedule (days, start time, end time, fee) for one specific doctor by name.
+    Use this when the patient asks about a specific doctor's availability or timing.
+
+    Args:
+        doctor_name: the name of the doctor, e.g. "ডা. রহমান" or "Rahman"
+    """
+    result = supabase.table("doctors").select("*").ilike("name", f"%{doctor_name}%").execute()
+    if not result.data:
+        return {"found": False, "message": "No doctor found with that name"}
+    return {"found": True, "doctor": result.data[0]}
+
+
+def book_appointment(patient_name: str, patient_phone: str, doctor_name: str,
+                      appointment_date: str, appointment_time: str, reason: str) -> dict:
+    """Book an appointment for a patient with a specific doctor.
+    Only call this after you have collected ALL required details from the patient:
+    patient's name, phone number, which doctor, preferred date, preferred time, and reason for visit.
+
+    Args:
+        patient_name: full name of the patient
+        patient_phone: phone number of the patient
+        doctor_name: name of the doctor to book with
+        appointment_date: date in YYYY-MM-DD format
+        appointment_time: time in HH:MM 24-hour format
+        reason: short reason for the visit, e.g. "fever", "checkup"
+    """
+    # find the doctor first
+    doctor_result = supabase.table("doctors").select("*").ilike("name", f"%{doctor_name}%").execute()
+    if not doctor_result.data:
+        return {"success": False, "message": f"Doctor '{doctor_name}' not found"}
+    doctor = doctor_result.data[0]
+
+    # find or create the patient record
+    patient_result = supabase.table("patients").select("*").eq("phone", patient_phone).execute()
+    if patient_result.data:
+        patient_id = patient_result.data[0]["id"]
+    else:
+        new_patient = supabase.table("patients").insert({
+            "name": patient_name,
+            "phone": patient_phone
+        }).execute()
+        patient_id = new_patient.data[0]["id"]
+
+    # create the appointment
+    new_appointment = supabase.table("appointments").insert({
+        "patient_id": patient_id,
+        "doctor_id": doctor["id"],
+        "appointment_date": appointment_date,
+        "appointment_time": appointment_time,
+        "reason": reason,
+        "status": "booked"
+    }).execute()
+
+    return {
+        "success": True,
+        "message": "Appointment booked successfully",
+        "appointment": new_appointment.data[0]
+    }
+
+
+def get_patient_appointments(patient_phone: str) -> dict:
+    """Get all upcoming (status='booked') appointments for a patient using their phone number.
+    Use this when the patient asks to see, check, or confirm their existing appointments.
+
+    Args:
+        patient_phone: the patient's phone number
+    """
+    patient_result = supabase.table("patients").select("*").eq("phone", patient_phone).execute()
+    if not patient_result.data:
+        return {"found": False, "message": "No patient found with this phone number"}
+
+    patient_id = patient_result.data[0]["id"]
+    appointments_result = (
+        supabase.table("appointments")
+        .select("*, doctors(name, specialty)")
+        .eq("patient_id", patient_id)
+        .eq("status", "booked")
+        .execute()
+    )
+    return {"found": True, "appointments": appointments_result.data}
+
+
+def cancel_appointment(patient_phone: str, appointment_date: str, appointment_time: str) -> dict:
+    """Cancel a specific booked appointment for a patient.
+    Use this only after confirming with the patient which exact appointment they want to cancel
+    (use get_patient_appointments first if you're not sure which one they mean).
+
+    Args:
+        patient_phone: the patient's phone number
+        appointment_date: date of the appointment to cancel, in YYYY-MM-DD format
+        appointment_time: time of the appointment to cancel, in HH:MM 24-hour format
+    """
+    patient_result = supabase.table("patients").select("*").eq("phone", patient_phone).execute()
+    if not patient_result.data:
+        return {"success": False, "message": "No patient found with this phone number"}
+
+    patient_id = patient_result.data[0]["id"]
+
+    # find the matching booked appointment
+    match_result = (
+        supabase.table("appointments")
+        .select("*")
+        .eq("patient_id", patient_id)
+        .eq("appointment_date", appointment_date)
+        .eq("appointment_time", appointment_time)
+        .eq("status", "booked")
+        .execute()
+    )
+    if not match_result.data:
+        return {"success": False, "message": "No matching booked appointment found"}
+
+    appointment_id = match_result.data[0]["id"]
+    supabase.table("appointments").update({"status": "cancelled"}).eq("id", appointment_id).execute()
+
+    return {"success": True, "message": "Appointment cancelled successfully"}
+
+
+# list of tools the AI is allowed to use
+CLINIC_TOOLS = [
+    get_all_doctors,
+    check_doctor_schedule,
+    book_appointment,
+    get_patient_appointments,
+    cancel_appointment,
+]
+
+
+# this defines the shape of the data the /chat endpoint expects
+# session_id identifies WHICH conversation this message belongs to
+# (later, this will be the patient's phone number when we connect WhatsApp)
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str = "default"
+
+
+# system prompt now tells the AI it has real tools to use, and not to make up info
+CLINIC_SYSTEM_PROMPT = f"""
+You are a helpful AI receptionist for a small clinic in Bangladesh.
+Patients will message you in Bangla, English, or mixed (Banglish).
+Today's date is {datetime.now().strftime('%Y-%m-%d')}.
+
+IMPORTANT RULES:
+- NEVER make up doctor schedules, fees, or availability. Always use the tools to get real data.
+- To book an appointment, you MUST collect: patient name, phone number, doctor name,
+  preferred date, preferred time, and reason for visit. Ask for anything missing before booking.
+  Remember what the patient already told you earlier in this conversation, don't ask again.
+- If the patient wants to check their existing appointments, ask for their phone number
+  (if not already known) and use get_patient_appointments.
+- If the patient wants to cancel an appointment, first check their appointments if you don't
+  already know which one they mean, confirm the exact appointment with them, then cancel it.
+- Keep replies short, warm, and clear.
+- Confirm appointment details back to the patient after successful booking or cancellation.
+"""
+
+# ==========================================================
+# CONVERSATION MEMORY
+# storing one "chat session" per patient (keyed by session_id / phone number)
+# NOTE: this is stored in memory (a python dict), so it resets if the server restarts.
+# this is fine for now (testing), but later for real production we would
+# want to store this more permanently.
+# ==========================================================
+active_chat_sessions = {}
+
+
+def get_or_create_chat_session(session_id: str):
+    """returns an existing chat session for this patient, or creates a new one"""
+    if session_id not in active_chat_sessions:
+        active_chat_sessions[session_id] = gemini_client.chats.create(
+            model=GEMINI_MODEL_NAME,
+            config=types.GenerateContentConfig(
+                tools=CLINIC_TOOLS,
+                system_instruction=CLINIC_SYSTEM_PROMPT
+            )
+        )
+    return active_chat_sessions[session_id]
+
+
+@app.post("/chat")
+def chat(request: ChatRequest):
+    """chat endpoint with memory - AI remembers earlier messages in the same session_id"""
+    try:
+        chat_session = get_or_create_chat_session(request.session_id)
+        response = chat_session.send_message(request.message)
+        return {
+            "status": "success",
+            "reply": response.text
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/reset-chat")
+def reset_chat(request: ChatRequest):
+    """clears the conversation memory for a given session_id - useful for testing"""
+    if request.session_id in active_chat_sessions:
+        del active_chat_sessions[request.session_id]
+    return {"status": "success", "message": f"Chat session '{request.session_id}' has been reset"}
+
+
+# ==========================================================
+# WHATSAPP INTEGRATION
+# two endpoints needed:
+#   GET  /webhook  -> meta calls this once to verify our url is real
+#   POST /webhook  -> meta sends us every incoming whatsapp message here
+# ==========================================================
+
+def send_whatsapp_message(to_phone_number: str, message_text: str):
+    """sends a text message back to the patient through whatsapp cloud api"""
+    url = f"https://graph.facebook.com/v21.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_phone_number,
+        "type": "text",
+        "text": {"body": message_text},
+    }
+    try:
+        response = httpx.post(url, headers=headers, json=payload, timeout=30)
+        print(f"[WhatsApp send] status={response.status_code} body={response.text}")
+        return response.json()
+    except Exception as e:
+        print(f"[WhatsApp send ERROR] {e}")
+        return None
+
+
+@app.get("/webhook")
+def verify_webhook(request: Request):
+    """meta hits this once when we set up the webhook, to check we own this server.
+    we just echo back the challenge if the verify token matches ours.
+    """
+    params = request.query_params
+    mode = params.get("hub.mode")
+    token = params.get("hub.verify_token")
+    challenge = params.get("hub.challenge")
+
+    if mode == "subscribe" and token == WHATSAPP_VERIFY_TOKEN:
+        print("[Webhook] verified successfully")
+        return Response(content=challenge, media_type="text/plain")
+
+    print("[Webhook] verification failed")
+    return Response(content="Verification failed", status_code=403)
+
+
+@app.post("/webhook")
+async def receive_whatsapp_message(request: Request):
+    """this is where every incoming whatsapp message lands.
+    we pull out the sender + text, run it through the same AI brain we built,
+    then send the reply back to them on whatsapp.
+    """
+    try:
+        data = await request.json()
+        print(f"[Webhook] incoming: {data}")
+
+        # meta wraps the message in a deep nested structure, so we dig carefully
+        entry = data.get("entry", [])
+        if not entry:
+            return {"status": "ok"}
+
+        changes = entry[0].get("changes", [])
+        if not changes:
+            return {"status": "ok"}
+
+        value = changes[0].get("value", {})
+        messages = value.get("messages", [])
+
+        # if there are no messages, it's probably just a status update (delivered/read)
+        # we ignore those
+        if not messages:
+            return {"status": "ok"}
+
+        message = messages[0]
+        sender_phone = message.get("from")          # patient's whatsapp number
+        message_type = message.get("type")
+
+        # for now we only handle plain text messages
+        if message_type != "text":
+            send_whatsapp_message(
+                sender_phone,
+                "দুঃখিত, এখন শুধু টেক্সট মেসেজ বুঝতে পারি। অনুগ্রহ করে লিখে জানান।"
+            )
+            return {"status": "ok"}
+
+        patient_text = message["text"]["body"]
+        print(f"[Webhook] {sender_phone} says: {patient_text}")
+
+        # use the phone number as the session id, so each patient gets their own memory
+        chat_session = get_or_create_chat_session(sender_phone)
+        ai_response = chat_session.send_message(patient_text)
+
+        send_whatsapp_message(sender_phone, ai_response.text)
+        return {"status": "ok"}
+
+    except Exception as e:
+        print(f"[Webhook ERROR] {e}")
+        # always return 200 to meta, otherwise they keep retrying the same message
+        return {"status": "error", "message": str(e)}
