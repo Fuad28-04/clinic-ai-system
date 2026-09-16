@@ -37,6 +37,78 @@ def home():
     return {"message": "Clinic AI Backend is running! ✅"}
 
 
+PRIVACY_POLICY_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy - Clinic AI Assistant</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 40px auto;
+         padding: 0 20px; line-height: 1.7; color: #222; }
+  h1 { border-bottom: 2px solid #eee; padding-bottom: 10px; }
+  h2 { margin-top: 32px; color: #333; }
+</style>
+</head>
+<body>
+<h1>Privacy Policy</h1>
+<p><strong>Service:</strong> Clinic AI Assistant<br>
+<strong>Last updated:</strong> September 2026</p>
+
+<h2>1. About this service</h2>
+<p>Clinic AI Assistant is an automated appointment booking assistant that clinics use to
+communicate with their patients over WhatsApp. It helps patients check doctor schedules,
+book appointments, view their existing appointments, and cancel appointments.</p>
+
+<h2>2. Information we collect</h2>
+<p>When you message the clinic through this service, we collect and store:</p>
+<ul>
+  <li>Your WhatsApp phone number</li>
+  <li>Your name, as you provide it</li>
+  <li>The reason for your visit, as you describe it</li>
+  <li>Your appointment details (doctor, date, time, status)</li>
+  <li>The messages exchanged in your conversation with the assistant</li>
+</ul>
+
+<h2>3. How we use your information</h2>
+<p>Your information is used only to book and manage your appointments, to remember the
+context of your conversation so you do not have to repeat yourself, and to share relevant
+details with the doctor you are booking with.</p>
+
+<h2>4. How your information is stored</h2>
+<p>Data is stored in a secured cloud database. Message content is processed by Google's
+Gemini AI to generate replies. We do not sell your data or use it for advertising.</p>
+
+<h2>5. Who can see your information</h2>
+<p>Your information is accessible to the clinic staff and the doctor treating you.
+It is not shared with any other third party, except the technical service providers
+required to operate this service (cloud hosting, database, AI processing, and WhatsApp).</p>
+
+<h2>6. Data retention and deletion</h2>
+<p>Your data is kept while you remain a patient of the clinic. You may request deletion
+of your data at any time by contacting the clinic or emailing the address below.
+We will delete your records within a reasonable period after such a request.</p>
+
+<h2>7. Medical disclaimer</h2>
+<p>This assistant helps with appointment scheduling only. It does not provide medical
+advice, diagnosis, or treatment. For medical emergencies, contact emergency services
+or visit a hospital immediately.</p>
+
+<h2>8. Contact</h2>
+<p>For any question about this policy or your data, contact:
+<strong>qutibidiboq55@gmail.com</strong></p>
+</body>
+</html>
+"""
+
+
+@app.get("/privacy")
+def privacy_policy():
+    """privacy policy page - meta requires a public privacy policy url to publish the app"""
+    return Response(content=PRIVACY_POLICY_HTML, media_type="text/html")
+
+
 @app.get("/test-database")
 def test_database():
     """testing if supabase connection is working properly"""
