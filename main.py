@@ -198,12 +198,25 @@ def book_appointment(patient_name: str, patient_phone: str, doctor_name: str,
         }).execute()
         patient_id = new_patient.data[0]["id"]
 
+    # work out the serial number: count how many are already booked
+    # for this doctor on this date, then this patient is the next one
+    existing = (
+        supabase.table("appointments")
+        .select("id")
+        .eq("doctor_id", doctor["id"])
+        .eq("appointment_date", appointment_date)
+        .eq("status", "booked")
+        .execute()
+    )
+    serial_number = len(existing.data) + 1
+
     # create the appointment
     new_appointment = supabase.table("appointments").insert({
         "patient_id": patient_id,
         "doctor_id": doctor["id"],
         "appointment_date": appointment_date,
         "appointment_time": appointment_time,
+        "serial_number": serial_number,
         "reason": reason,
         "status": "booked"
     }).execute()
@@ -211,6 +224,7 @@ def book_appointment(patient_name: str, patient_phone: str, doctor_name: str,
     return {
         "success": True,
         "message": "Appointment booked successfully",
+        "serial_number": serial_number,
         "appointment": new_appointment.data[0]
     }
 
@@ -272,6 +286,74 @@ def cancel_appointment(patient_phone: str, appointment_date: str, appointment_ti
     return {"success": True, "message": "Appointment cancelled successfully"}
 
 
+def check_queue_status(patient_phone: str) -> dict:
+    """Check the live queue status for a patient who has an appointment today.
+    Tells them which serial number the doctor is currently seeing, their own serial number,
+    and roughly how long they still have to wait.
+    Use this when the patient asks things like "how long will it take", "what's my turn",
+    "koto number cholche", "amar serial koto", or anything about waiting time.
+
+    Args:
+        patient_phone: the patient's phone number
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    patient_result = supabase.table("patients").select("id").eq("phone", patient_phone).execute()
+    if not patient_result.data:
+        return {"found": False, "message": "No patient found with this phone number"}
+    patient_id = patient_result.data[0]["id"]
+
+    # find their appointment for today
+    appt_result = (
+        supabase.table("appointments")
+        .select("*, doctors(name, avg_consultation_minutes)")
+        .eq("patient_id", patient_id)
+        .eq("appointment_date", today)
+        .eq("status", "booked")
+        .execute()
+    )
+    if not appt_result.data:
+        return {"found": False, "message": "This patient has no booked appointment for today"}
+
+    appointment = appt_result.data[0]
+    doctor = appointment["doctors"]
+    my_serial = appointment.get("serial_number")
+
+    # look up the live queue state for this doctor today
+    queue_result = (
+        supabase.table("doctor_queue_state")
+        .select("*")
+        .eq("doctor_id", appointment["doctor_id"])
+        .eq("queue_date", today)
+        .execute()
+    )
+
+    if not queue_result.data or queue_result.data[0]["current_serial"] == 0:
+        return {
+            "found": True,
+            "doctor_name": doctor["name"],
+            "my_serial": my_serial,
+            "chamber_started": False,
+            "message": "The doctor has not started seeing patients yet today",
+        }
+
+    current_serial = queue_result.data[0]["current_serial"]
+    avg_minutes = doctor.get("avg_consultation_minutes") or 10
+    people_ahead = max(0, my_serial - current_serial)
+    estimated_wait = people_ahead * avg_minutes
+
+    return {
+        "found": True,
+        "doctor_name": doctor["name"],
+        "chamber_started": True,
+        "current_serial": current_serial,
+        "my_serial": my_serial,
+        "people_ahead": people_ahead,
+        "estimated_wait_minutes": estimated_wait,
+        "is_my_turn": people_ahead == 0,
+    }
+
+
 # list of tools the AI is allowed to use
 CLINIC_TOOLS = [
     get_all_doctors,
@@ -279,6 +361,7 @@ CLINIC_TOOLS = [
     book_appointment,
     get_patient_appointments,
     cancel_appointment,
+    check_queue_status,
 ]
 
 
@@ -305,6 +388,10 @@ IMPORTANT RULES:
   (if not already known) and use get_patient_appointments.
 - If the patient wants to cancel an appointment, first check their appointments if you don't
   already know which one they mean, confirm the exact appointment with them, then cancel it.
+- If the patient asks about waiting time, their turn, or which serial is running now,
+  use check_queue_status. Tell them the current serial, their serial, and the estimated wait
+  so they can leave home at the right time.
+- When you book an appointment, always tell the patient their serial number.
 - Keep replies short, warm, and clear.
 - Confirm appointment details back to the patient after successful booking or cancellation.
 """
@@ -513,3 +600,263 @@ async def receive_whatsapp_message(request: Request):
         print(f"[Webhook ERROR] {e}")
         # always return 200 to meta, otherwise they keep retrying the same message
         return {"status": "error", "message": str(e)}
+
+
+# ==========================================================
+# DOCTOR QUEUE INTERFACE
+# a simple web page the doctor opens on their phone/computer.
+# they press "Next Patient" after finishing with each patient,
+# which moves the queue forward so waiting patients can see it.
+# ==========================================================
+
+def get_or_create_queue(doctor_id: int, queue_date: str) -> dict:
+    """gets today's queue row for a doctor, creating it if it's not there yet"""
+    result = (
+        supabase.table("doctor_queue_state")
+        .select("*")
+        .eq("doctor_id", doctor_id)
+        .eq("queue_date", queue_date)
+        .execute()
+    )
+    if result.data:
+        return result.data[0]
+
+    created = supabase.table("doctor_queue_state").insert({
+        "doctor_id": doctor_id,
+        "queue_date": queue_date,
+        "current_serial": 0,
+    }).execute()
+    return created.data[0]
+
+
+@app.get("/doctor/queue/{doctor_id}")
+def get_queue_info(doctor_id: int):
+    """returns the current queue state + today's patient list for one doctor"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        queue = get_or_create_queue(doctor_id, today)
+
+        doctor = supabase.table("doctors").select("name").eq("id", doctor_id).execute()
+        doctor_name = doctor.data[0]["name"] if doctor.data else "Unknown"
+
+        appointments = (
+            supabase.table("appointments")
+            .select("serial_number, reason, status, patients(name, phone)")
+            .eq("doctor_id", doctor_id)
+            .eq("appointment_date", today)
+            .eq("status", "booked")
+            .order("serial_number")
+            .execute()
+        )
+
+        return {
+            "status": "success",
+            "doctor_name": doctor_name,
+            "date": today,
+            "current_serial": queue["current_serial"],
+            "total_patients": len(appointments.data),
+            "patients": appointments.data,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/doctor/next/{doctor_id}")
+def next_patient(doctor_id: int):
+    """doctor finished with the current patient - move to the next serial"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        queue = get_or_create_queue(doctor_id, today)
+        new_serial = queue["current_serial"] + 1
+
+        supabase.table("doctor_queue_state").update({
+            "current_serial": new_serial,
+            "updated_at": datetime.now().isoformat(),
+        }).eq("id", queue["id"]).execute()
+
+        # mark the previous patient as completed, and note the start time of the new one
+        if queue["current_serial"] > 0:
+            supabase.table("appointments").update({
+                "status": "completed",
+                "finished_at": datetime.now().isoformat(),
+            }).eq("doctor_id", doctor_id).eq("appointment_date", today).eq(
+                "serial_number", queue["current_serial"]
+            ).execute()
+
+        supabase.table("appointments").update({
+            "started_at": datetime.now().isoformat(),
+        }).eq("doctor_id", doctor_id).eq("appointment_date", today).eq(
+            "serial_number", new_serial
+        ).execute()
+
+        return {"status": "success", "current_serial": new_serial}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/doctor/reset/{doctor_id}")
+def reset_queue(doctor_id: int):
+    """resets today's queue back to 0 - useful if something goes wrong"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        queue = get_or_create_queue(doctor_id, today)
+        supabase.table("doctor_queue_state").update({
+            "current_serial": 0,
+            "updated_at": datetime.now().isoformat(),
+        }).eq("id", queue["id"]).execute()
+        return {"status": "success", "current_serial": 0}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+DOCTOR_PAGE_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Doctor Queue</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; margin: 0; padding: 20px;
+         background: #f4f6f8; color: #1a1a1a; }
+  .wrap { max-width: 480px; margin: 0 auto; }
+  .card { background: #fff; border-radius: 14px; padding: 22px;
+          box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 16px; }
+  h2 { margin: 0 0 4px; font-size: 20px; }
+  .sub { color: #666; font-size: 14px; margin-bottom: 18px; }
+  .serial-box { text-align: center; padding: 20px 0; }
+  .serial-label { color: #666; font-size: 14px; }
+  .serial { font-size: 68px; font-weight: 700; color: #1976d2; line-height: 1.1; }
+  button { width: 100%; padding: 16px; font-size: 17px; font-weight: 600;
+           border: none; border-radius: 10px; cursor: pointer; }
+  .next { background: #1976d2; color: #fff; }
+  .next:active { background: #145ea8; }
+  .reset { background: #eee; color: #444; margin-top: 10px; font-size: 14px; padding: 10px; }
+  select { width: 100%; padding: 12px; font-size: 16px; border-radius: 8px;
+           border: 1px solid #ccc; margin-bottom: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 6px; border-bottom: 1px solid #eee; }
+  th { color: #666; font-weight: 600; }
+  .now { background: #e3f2fd; font-weight: 600; }
+  .done { color: #aaa; text-decoration: line-through; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="card">
+    <h2>Doctor Queue</h2>
+    <div class="sub" id="dateLabel"></div>
+    <select id="doctorSelect" onchange="loadQueue()"></select>
+  </div>
+
+  <div class="card">
+    <div class="serial-box">
+      <div class="serial-label">Now serving</div>
+      <div class="serial" id="currentSerial">-</div>
+      <div class="serial-label" id="totalLabel"></div>
+    </div>
+    <button class="next" onclick="nextPatient()">Next Patient &rarr;</button>
+    <button class="reset" onclick="resetQueue()">Reset queue to 0</button>
+  </div>
+
+  <div class="card">
+    <h2 style="font-size:16px;margin-bottom:12px;">Today's patients</h2>
+    <table>
+      <thead><tr><th>#</th><th>Name</th><th>Reason</th></tr></thead>
+      <tbody id="patientList"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+let doctorId = null;
+let currentSerial = 0;
+
+document.getElementById('dateLabel').textContent = new Date().toDateString();
+
+async function loadDoctors() {
+  const res = await fetch('/doctors-list');
+  const data = await res.json();
+  const sel = document.getElementById('doctorSelect');
+  sel.innerHTML = '';
+  data.doctors.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.id;
+    opt.textContent = d.name + ' (' + d.specialty + ')';
+    sel.appendChild(opt);
+  });
+  if (data.doctors.length > 0) {
+    doctorId = data.doctors[0].id;
+    loadQueue();
+  }
+}
+
+async function loadQueue() {
+  doctorId = document.getElementById('doctorSelect').value;
+  const res = await fetch('/doctor/queue/' + doctorId);
+  const data = await res.json();
+  if (data.status !== 'success') return;
+
+  currentSerial = data.current_serial;
+  document.getElementById('currentSerial').textContent =
+      currentSerial === 0 ? '-' : currentSerial;
+  document.getElementById('totalLabel').textContent =
+      'out of ' + data.total_patients + ' booked today';
+
+  const tbody = document.getElementById('patientList');
+  tbody.innerHTML = '';
+  if (data.patients.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="3" style="color:#999">No patients booked today</td></tr>';
+    return;
+  }
+  data.patients.forEach(p => {
+    const tr = document.createElement('tr');
+    if (p.serial_number === currentSerial) tr.className = 'now';
+    else if (p.serial_number < currentSerial) tr.className = 'done';
+    tr.innerHTML = '<td>' + (p.serial_number || '-') + '</td>' +
+                   '<td>' + (p.patients ? p.patients.name : '-') + '</td>' +
+                   '<td>' + (p.reason || '-') + '</td>';
+    tbody.appendChild(tr);
+  });
+}
+
+async function nextPatient() {
+  if (!doctorId) return;
+  await fetch('/doctor/next/' + doctorId, { method: 'POST' });
+  loadQueue();
+}
+
+async function resetQueue() {
+  if (!doctorId) return;
+  if (!confirm('Reset the queue back to 0?')) return;
+  await fetch('/doctor/reset/' + doctorId, { method: 'POST' });
+  loadQueue();
+}
+
+loadDoctors();
+setInterval(loadQueue, 30000);   // auto refresh every 30s
+</script>
+</body>
+</html>
+"""
+
+
+@app.get("/doctors-list")
+def doctors_list():
+    """small helper the doctor page uses to fill its dropdown"""
+    try:
+        result = supabase.table("doctors").select("id, name, specialty").eq(
+            "is_active", True
+        ).order("id").execute()
+        return {"status": "success", "doctors": result.data}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "doctors": []}
+
+
+@app.get("/doctor")
+def doctor_page():
+    """the queue control page the doctor opens"""
+    return Response(content=DOCTOR_PAGE_HTML, media_type="text/html")
