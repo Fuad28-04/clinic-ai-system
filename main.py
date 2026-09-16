@@ -34,7 +34,7 @@ app = FastAPI()
 @app.get("/")
 def home():
     """just to check if the server is running or not"""
-    return {"message": "Clinic AI Backend is running!"}
+    return {"message": "Clinic AI Backend is running! ✅"}
 
 
 @app.get("/test-database")
@@ -44,7 +44,7 @@ def test_database():
         result = supabase.table("doctors").select("*").execute()
         return {
             "status": "success",
-            "message": "Database connection is working",
+            "message": "Database connection is working ✅",
             "doctors": result.data
         }
     except Exception as e:
@@ -61,7 +61,7 @@ def test_ai():
         )
         return {
             "status": "success",
-            "message": "Gemini AI connection is working",
+            "message": "Gemini AI connection is working ✅",
             "ai_response": response.text
         }
     except Exception as e:
@@ -238,37 +238,93 @@ IMPORTANT RULES:
 """
 
 # ==========================================================
-# CONVERSATION MEMORY
-# storing one "chat session" per patient (keyed by session_id / phone number)
-# NOTE: this is stored in memory (a python dict), so it resets if the server restarts.
-# this is fine for now (testing), but later for real production we would
-# want to store this more permanently.
+# CONVERSATION MEMORY (database backed)
+# every message is saved in supabase, so the conversation survives
+# server restarts / sleeps. we load the recent history each time
+# and rebuild the chat session from it.
 # ==========================================================
-active_chat_sessions = {}
+
+# how many past messages to load. keeping this limited so we don't
+# send a huge conversation to the AI every single time (costs tokens + slow)
+HISTORY_LIMIT = 30
 
 
-def get_or_create_chat_session(session_id: str):
-    """returns an existing chat session for this patient, or creates a new one"""
-    if session_id not in active_chat_sessions:
-        active_chat_sessions[session_id] = gemini_client.chats.create(
-            model=GEMINI_MODEL_NAME,
-            config=types.GenerateContentConfig(
-                tools=CLINIC_TOOLS,
-                system_instruction=CLINIC_SYSTEM_PROMPT
-            )
+def load_conversation_history(session_id: str) -> list:
+    """loads recent messages for this patient from the database,
+    formatted the way gemini expects them
+    """
+    try:
+        result = (
+            supabase.table("conversation_messages")
+            .select("role, content")
+            .eq("session_id", session_id)
+            .order("created_at", desc=True)
+            .limit(HISTORY_LIMIT)
+            .execute()
         )
-    return active_chat_sessions[session_id]
+        # we fetched newest-first (so the limit keeps the RECENT ones),
+        # but gemini needs oldest-first, so flip it back
+        rows = list(reversed(result.data))
+
+        history = []
+        for row in rows:
+            history.append(
+                types.Content(
+                    role=row["role"],
+                    parts=[types.Part(text=row["content"])]
+                )
+            )
+        return history
+    except Exception as e:
+        print(f"[History load ERROR] {e}")
+        return []
+
+
+def save_message(session_id: str, role: str, content: str):
+    """saves one message (patient's or AI's) to the database"""
+    try:
+        supabase.table("conversation_messages").insert({
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+        }).execute()
+    except Exception as e:
+        print(f"[History save ERROR] {e}")
+
+
+def ask_ai(session_id: str, patient_message: str) -> str:
+    """the main brain call.
+    loads history -> asks gemini -> saves both messages -> returns the reply
+    """
+    history = load_conversation_history(session_id)
+
+    chat_session = gemini_client.chats.create(
+        model=GEMINI_MODEL_NAME,
+        history=history,
+        config=types.GenerateContentConfig(
+            tools=CLINIC_TOOLS,
+            system_instruction=CLINIC_SYSTEM_PROMPT
+        )
+    )
+
+    response = chat_session.send_message(patient_message)
+    reply_text = response.text
+
+    # save both sides of the exchange
+    save_message(session_id, "user", patient_message)
+    save_message(session_id, "model", reply_text)
+
+    return reply_text
 
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    """chat endpoint with memory - AI remembers earlier messages in the same session_id"""
+    """chat endpoint - memory now lives in the database, not RAM"""
     try:
-        chat_session = get_or_create_chat_session(request.session_id)
-        response = chat_session.send_message(request.message)
+        reply = ask_ai(request.session_id, request.message)
         return {
             "status": "success",
-            "reply": response.text
+            "reply": reply
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -276,10 +332,14 @@ def chat(request: ChatRequest):
 
 @app.post("/reset-chat")
 def reset_chat(request: ChatRequest):
-    """clears the conversation memory for a given session_id - useful for testing"""
-    if request.session_id in active_chat_sessions:
-        del active_chat_sessions[request.session_id]
-    return {"status": "success", "message": f"Chat session '{request.session_id}' has been reset"}
+    """wipes the conversation history for a session - useful for testing"""
+    try:
+        supabase.table("conversation_messages").delete().eq(
+            "session_id", request.session_id
+        ).execute()
+        return {"status": "success", "message": f"History for '{request.session_id}' cleared"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 # ==========================================================
@@ -372,10 +432,9 @@ async def receive_whatsapp_message(request: Request):
         print(f"[Webhook] {sender_phone} says: {patient_text}")
 
         # use the phone number as the session id, so each patient gets their own memory
-        chat_session = get_or_create_chat_session(sender_phone)
-        ai_response = chat_session.send_message(patient_text)
+        reply_text = ask_ai(sender_phone, patient_text)
 
-        send_whatsapp_message(sender_phone, ai_response.text)
+        send_whatsapp_message(sender_phone, reply_text)
         return {"status": "ok"}
 
     except Exception as e:
