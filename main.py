@@ -856,221 +856,384 @@ Strict rules:
 
 DOCTOR_PAGE_HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="bn">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Doctor Queue</title>
+<title>Chamber queue</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  * { box-sizing: border-box; }
-  body { font-family: system-ui, sans-serif; margin: 0; padding: 20px;
-         background: #f4f6f8; color: #1a1a1a; }
-  .wrap { max-width: 480px; margin: 0 auto; }
-  .card { background: #fff; border-radius: 14px; padding: 22px;
-          box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 16px; }
-  h2 { margin: 0 0 4px; font-size: 20px; }
-  .sub { color: #666; font-size: 14px; margin-bottom: 18px; }
-  .serial-box { text-align: center; padding: 20px 0; }
-  .serial-label { color: #666; font-size: 14px; }
-  .serial { font-size: 68px; font-weight: 700; color: #1976d2; line-height: 1.1; }
-  button { width: 100%; padding: 16px; font-size: 17px; font-weight: 600;
-           border: none; border-radius: 10px; cursor: pointer; }
-  .next { background: #1976d2; color: #fff; }
-  .next:active { background: #145ea8; }
-  .reset { background: #eee; color: #444; margin-top: 10px; font-size: 14px; padding: 10px; }
-  select { width: 100%; padding: 12px; font-size: 16px; border-radius: 8px;
-           border: 1px solid #ccc; margin-bottom: 6px; }
-  table { width: 100%; border-collapse: collapse; font-size: 14px; }
-  th, td { text-align: left; padding: 9px 6px; border-bottom: 1px solid #eee; }
-  th { color: #666; font-weight: 600; }
-  .now { background: #e3f2fd; font-weight: 600; }
-  .done { color: #aaa; text-decoration: line-through; }
-  tbody tr { cursor: pointer; }
-  tbody tr:active { background: #f0f0f0; }
-  .hint { color: #999; font-size: 12px; margin-top: 10px; }
+  :root {
+    --ink:      #16262B;
+    --ink-soft: #5C6F74;
+    --line:     #D6DEE0;
+    --bg:       #E9EDEE;
+    --surface:  #FFFFFF;
+    --accent:   #0F6B5C;
+    --accent-d: #0A5145;
+    --spent:    #A8B4B8;
+    --warn-bg:  #FBF6E9;
+  }
 
-  /* patient brief panel */
-  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45);
-             display: none; align-items: flex-end; justify-content: center; }
-  .overlay.open { display: flex; }
-  .sheet { background: #fff; width: 100%; max-width: 480px; max-height: 88vh;
-           overflow-y: auto; border-radius: 16px 16px 0 0; padding: 22px; }
-  .sheet h3 { margin: 0 0 2px; font-size: 19px; }
-  .sheet .meta { color: #666; font-size: 14px; margin-bottom: 16px; }
-  .section-title { font-size: 13px; font-weight: 700; color: #1976d2;
-                   text-transform: uppercase; letter-spacing: .4px;
-                   margin: 20px 0 8px; }
-  .summary-box { background: #f4f8fd; border-left: 3px solid #1976d2;
-                 padding: 12px 14px; border-radius: 6px; font-size: 14px;
-                 line-height: 1.65; white-space: pre-wrap; }
-  .visit { border-bottom: 1px solid #eee; padding: 9px 0; font-size: 14px; }
-  .visit .date { font-weight: 600; }
-  .visit .detail { color: #666; font-size: 13px; }
-  .close-btn { background: #eee; color: #333; margin-top: 18px; }
-  .disclaimer { color: #999; font-size: 11px; margin-top: 8px; line-height: 1.5; }
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Hind Siliguri", system-ui, "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell { max-width: 460px; margin: 0 auto; padding: 18px 16px 40px; }
+
+  /* ---------- doctor picker ---------- */
+  .picker { margin-bottom: 18px; }
+  .picker label { display: block; font-size: 13px; color: var(--ink-soft); margin-bottom: 5px; }
+  select {
+    width: 100%; padding: 11px 12px; font-size: 16px;
+    font-family: inherit; color: var(--ink);
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+
+  /* ---------- the hero: who walks in next ---------- */
+  .oncall {
+    background: var(--surface); border-radius: 14px;
+    padding: 22px 20px 20px; margin-bottom: 14px;
+    border-top: 4px solid var(--accent);
+  }
+  .oncall .cue { font-size: 13px; color: var(--ink-soft); margin-bottom: 10px; }
+  .oncall .who { display: flex; align-items: baseline; gap: 12px; }
+  .oncall .num {
+    font-size: 52px; font-weight: 700; line-height: 1;
+    color: var(--accent); letter-spacing: -1px;
+  }
+  .oncall .name { font-size: 22px; font-weight: 600; }
+  .oncall .why { color: var(--ink-soft); font-size: 15px; margin-top: 6px; min-height: 23px; }
+
+  button {
+    font-family: inherit; font-size: 16px; font-weight: 600;
+    border: none; border-radius: 9px; cursor: pointer;
+  }
+  button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+  .call {
+    width: 100%; margin-top: 18px; padding: 15px;
+    background: var(--accent); color: #fff;
+  }
+  .call:active { background: var(--accent-d); }
+  .call:disabled { background: var(--spent); cursor: default; }
+
+  /* ---------- running strip ---------- */
+  .strip {
+    display: flex; justify-content: space-between;
+    background: var(--surface); border-radius: 10px;
+    padding: 12px 16px; margin-bottom: 14px;
+    font-size: 14px; color: var(--ink-soft);
+  }
+  .strip b { color: var(--ink); font-weight: 600; }
+  .undo {
+    background: none; color: var(--ink-soft); font-size: 13px;
+    font-weight: 500; padding: 0; text-decoration: underline;
+  }
+
+  /* ---------- queue list ---------- */
+  .list { background: var(--surface); border-radius: 12px; padding: 6px 4px 4px; }
+  .list h2 { font-size: 14px; font-weight: 600; color: var(--ink-soft);
+             margin: 12px 14px 8px; }
+  .row {
+    display: grid; grid-template-columns: 34px 1fr;
+    gap: 10px; padding: 11px 14px; align-items: baseline;
+    border-top: 1px solid var(--line); cursor: pointer;
+  }
+  .row:first-of-type { border-top: none; }
+  .row:hover, .row:focus-visible { background: #F3F7F7; outline: none; }
+  .row .s { font-weight: 600; color: var(--ink-soft); }
+  .row .n { font-weight: 500; }
+  .row .r { font-size: 14px; color: var(--ink-soft); }
+  .row.current { background: #EAF4F1; }
+  .row.current .s, .row.current .n { color: var(--accent-d); }
+  .row.seen { color: var(--spent); }
+  .row.seen .s, .row.seen .n, .row.seen .r { color: var(--spent); }
+  .empty { padding: 18px 14px; color: var(--ink-soft); font-size: 15px; }
+
+  /* ---------- patient brief ---------- */
+  .scrim {
+    position: fixed; inset: 0; background: rgba(12,28,32,.5);
+    display: none; align-items: flex-end; justify-content: center; z-index: 20;
+  }
+  .scrim.open { display: flex; }
+  .brief {
+    background: var(--surface); width: 100%; max-width: 460px;
+    max-height: 86vh; overflow-y: auto;
+    border-radius: 16px 16px 0 0; padding: 24px 20px 20px;
+  }
+  .brief h3 { margin: 0; font-size: 21px; font-weight: 600; }
+  .brief .id { color: var(--ink-soft); font-size: 14px; margin-bottom: 20px; }
+  .brief h4 { font-size: 14px; font-weight: 600; color: var(--ink-soft);
+              margin: 22px 0 8px; }
+  .said {
+    background: #F3F7F7; border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0; padding: 14px 16px;
+    font-size: 15px; line-height: 1.7; white-space: pre-wrap;
+  }
+  .caveat { color: var(--ink-soft); font-size: 12px; margin-top: 8px; line-height: 1.5; }
+  .visit { padding: 10px 0; border-top: 1px solid var(--line); font-size: 15px; }
+  .visit:first-of-type { border-top: none; }
+  .visit .d { font-weight: 500; }
+  .visit .x { color: var(--ink-soft); font-size: 14px; }
+  .shut { width: 100%; margin-top: 20px; padding: 13px;
+          background: var(--bg); color: var(--ink); }
+
+  /* ---------- desktop: brief lives beside the queue ---------- */
+  @media (min-width: 900px) {
+    .shell {
+      max-width: 1040px; display: grid; gap: 22px;
+      grid-template-columns: 420px 1fr;
+      grid-template-areas: "pick brief" "call brief" "strip brief" "list brief";
+      align-content: start; padding-top: 28px;
+    }
+    .picker { grid-area: pick; margin-bottom: 0; }
+    .oncall { grid-area: call; margin-bottom: 0; }
+    .strip  { grid-area: strip; margin-bottom: 0; }
+    .list   { grid-area: list; }
+
+    .scrim {
+      grid-area: brief; position: static; display: block;
+      background: none; z-index: auto;
+    }
+    .brief {
+      max-width: none; border-radius: 14px; max-height: none;
+      padding: 26px 24px; position: sticky; top: 28px;
+    }
+    .scrim:not(.open) .brief { display: none; }
+    .scrim:not(.open)::before {
+      content: "Pick a patient to read their notes";
+      display: block; color: var(--ink-soft); font-size: 15px;
+      padding: 26px 24px; background: var(--surface); border-radius: 14px;
+    }
+    .shut { display: none; }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .row, .call { transition: background .12s ease; }
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
 
-  <div class="card">
-    <h2>Doctor Queue</h2>
-    <div class="sub" id="dateLabel"></div>
-    <select id="doctorSelect" onchange="loadQueue()"></select>
+<div class="shell">
+
+  <div class="picker">
+    <label for="doc">Chamber</label>
+    <select id="doc" onchange="loadQueue()"></select>
   </div>
 
-  <div class="card">
-    <div class="serial-box">
-      <div class="serial-label">Now serving</div>
-      <div class="serial" id="currentSerial">-</div>
-      <div class="serial-label" id="totalLabel"></div>
+  <section class="oncall">
+    <div class="cue" id="cue">Next in</div>
+    <div class="who">
+      <div class="num" id="nextNum">&mdash;</div>
+      <div class="name" id="nextName">Nobody waiting</div>
     </div>
-    <button class="next" onclick="nextPatient()">Next Patient &rarr;</button>
-    <button class="reset" onclick="resetQueue()">Reset queue to 0</button>
+    <div class="why" id="nextWhy"></div>
+    <button class="call" id="callBtn" onclick="callNext()">Call next patient</button>
+  </section>
+
+  <div class="strip">
+    <span>Now with you: <b id="nowNum">none yet</b></span>
+    <span><b id="leftNum">0</b> still waiting</span>
   </div>
 
-  <div class="card">
-    <h2 style="font-size:16px;margin-bottom:12px;">Today's patients</h2>
-    <table>
-      <thead><tr><th>#</th><th>Name</th><th>Reason</th></tr></thead>
-      <tbody id="patientList"></tbody>
-    </table>
-    <div class="hint">Tap a patient to see their brief</div>
+  <div class="list">
+    <h2>Today&rsquo;s list <button class="undo" onclick="resetQueue()">start over</button></h2>
+    <div id="rows"></div>
   </div>
 
 </div>
 
-<div class="overlay" id="overlay" onclick="closeBrief(event)">
-  <div class="sheet" onclick="event.stopPropagation()">
-    <h3 id="briefName">-</h3>
-    <div class="meta" id="briefMeta"></div>
+<div class="scrim" id="scrim" onclick="shutBrief(event)">
+  <div class="brief" onclick="event.stopPropagation()">
+    <h3 id="bName">&nbsp;</h3>
+    <div class="id" id="bId"></div>
 
-    <div class="section-title">Summary</div>
-    <div class="summary-box" id="briefSummary">Loading...</div>
-    <div class="disclaimer">
-      Auto-generated from what the patient wrote to the assistant.
-      Context only &mdash; not a diagnosis.
-    </div>
+    <h4>What they told the assistant</h4>
+    <div class="said" id="bSaid">Loading</div>
+    <p class="caveat">Written from the patient&rsquo;s own words. Background only, not a clinical opinion.</p>
 
-    <div class="section-title">Previous visits</div>
-    <div id="briefHistory"></div>
+    <h4>Earlier visits</h4>
+    <div id="bVisits"></div>
 
-    <button class="close-btn" onclick="closeBrief()">Close</button>
+    <button class="shut" onclick="shutBrief()">Close</button>
   </div>
 </div>
 
 <script>
-let doctorId = null;
-let currentSerial = 0;
-
-document.getElementById('dateLabel').textContent = new Date().toDateString();
+let docId = null;
+let running = 0;
+let queue = [];
 
 async function loadDoctors() {
   const res = await fetch('/doctors-list');
   const data = await res.json();
-  const sel = document.getElementById('doctorSelect');
+  const sel = document.getElementById('doc');
   sel.innerHTML = '';
-  data.doctors.forEach(d => {
-    const opt = document.createElement('option');
-    opt.value = d.id;
-    opt.textContent = d.name + ' (' + d.specialty + ')';
-    sel.appendChild(opt);
+  (data.doctors || []).forEach(d => {
+    const o = document.createElement('option');
+    o.value = d.id;
+    o.textContent = d.name + ' \\u00b7 ' + d.specialty;
+    sel.appendChild(o);
   });
-  if (data.doctors.length > 0) {
-    doctorId = data.doctors[0].id;
-    loadQueue();
-  }
+  if (data.doctors && data.doctors.length) loadQueue();
 }
 
 async function loadQueue() {
-  doctorId = document.getElementById('doctorSelect').value;
-  const res = await fetch('/doctor/queue/' + doctorId);
+  docId = document.getElementById('doc').value;
+  if (!docId) return;
+  const res = await fetch('/doctor/queue/' + docId);
   const data = await res.json();
   if (data.status !== 'success') return;
 
-  currentSerial = data.current_serial;
-  document.getElementById('currentSerial').textContent =
-      currentSerial === 0 ? '-' : currentSerial;
-  document.getElementById('totalLabel').textContent =
-      'out of ' + data.total_patients + ' booked today';
+  running = data.current_serial;
+  queue = data.patients || [];
 
-  const tbody = document.getElementById('patientList');
-  tbody.innerHTML = '';
-  if (data.patients.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="3" style="color:#999">No patients booked today</td></tr>';
+  const waiting = queue.filter(p => p.serial_number > running);
+  const upNext = waiting.length ? waiting[0] : null;
+
+  document.getElementById('nowNum').textContent = running === 0 ? 'none yet' : running;
+  document.getElementById('leftNum').textContent = waiting.length;
+
+  const btn = document.getElementById('callBtn');
+  if (upNext) {
+    document.getElementById('cue').textContent =
+        running === 0 ? 'First up' : 'Next in';
+    document.getElementById('nextNum').textContent = upNext.serial_number;
+    document.getElementById('nextName').textContent =
+        upNext.patients ? upNext.patients.name : 'Unnamed';
+    document.getElementById('nextWhy').textContent = upNext.reason || '';
+    btn.disabled = false;
+    btn.textContent = 'Call next patient';
+  } else {
+    document.getElementById('cue').textContent = 'Next in';
+    document.getElementById('nextNum').textContent = '\\u2014';
+    document.getElementById('nextName').textContent =
+        queue.length ? 'Everyone has been seen' : 'Nobody booked today';
+    document.getElementById('nextWhy').textContent = '';
+    btn.disabled = true;
+    btn.textContent = queue.length ? 'List finished' : 'Nobody to call';
+  }
+
+  drawRows();
+}
+
+function drawRows() {
+  const box = document.getElementById('rows');
+  box.innerHTML = '';
+  if (!queue.length) {
+    box.innerHTML = '<div class="empty">No appointments booked for today.</div>';
     return;
   }
-  data.patients.forEach(p => {
-    const tr = document.createElement('tr');
-    if (p.serial_number === currentSerial) tr.className = 'now';
-    else if (p.serial_number < currentSerial) tr.className = 'done';
-    tr.innerHTML = '<td>' + (p.serial_number || '-') + '</td>' +
-                   '<td>' + (p.patients ? p.patients.name : '-') + '</td>' +
-                   '<td>' + (p.reason || '-') + '</td>';
-    tr.onclick = () => openBrief(p.patient_id);
-    tbody.appendChild(tr);
+  queue.forEach(p => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.tabIndex = 0;
+    if (p.serial_number === running) row.classList.add('current');
+    else if (p.serial_number < running) row.classList.add('seen');
+
+    const s = document.createElement('div');
+    s.className = 's';
+    s.textContent = p.serial_number || '-';
+
+    const body = document.createElement('div');
+    const n = document.createElement('div');
+    n.className = 'n';
+    n.textContent = p.patients ? p.patients.name : 'Unnamed';
+    const r = document.createElement('div');
+    r.className = 'r';
+    r.textContent = p.reason || '';
+    body.appendChild(n);
+    if (p.reason) body.appendChild(r);
+
+    row.appendChild(s);
+    row.appendChild(body);
+    row.onclick = () => openBrief(p.patient_id);
+    row.onkeydown = e => { if (e.key === 'Enter') openBrief(p.patient_id); };
+    box.appendChild(row);
   });
+}
+
+async function callNext() {
+  if (!docId) return;
+  const btn = document.getElementById('callBtn');
+  btn.disabled = true;
+  await fetch('/doctor/next/' + docId, { method: 'POST' });
+  await loadQueue();
+}
+
+async function resetQueue() {
+  if (!docId) return;
+  if (!confirm('Set the list back to the beginning?')) return;
+  await fetch('/doctor/reset/' + docId, { method: 'POST' });
+  loadQueue();
 }
 
 async function openBrief(patientId) {
   if (!patientId) return;
-  document.getElementById('overlay').classList.add('open');
-  document.getElementById('briefName').textContent = 'Loading...';
-  document.getElementById('briefMeta').textContent = '';
-  document.getElementById('briefSummary').textContent = 'Preparing summary...';
-  document.getElementById('briefHistory').innerHTML = '';
+  document.getElementById('scrim').classList.add('open');
+  document.getElementById('bName').textContent = 'Loading';
+  document.getElementById('bId').textContent = '';
+  document.getElementById('bSaid').textContent = 'Reading their messages';
+  document.getElementById('bVisits').innerHTML = '';
 
   const res = await fetch('/doctor/patient-brief/' + patientId);
   const data = await res.json();
   if (data.status !== 'success') {
-    document.getElementById('briefSummary').textContent = 'Could not load this patient.';
+    document.getElementById('bName').textContent = 'Could not load';
+    document.getElementById('bSaid').textContent =
+        'This patient\\u2019s notes could not be opened. Try again in a moment.';
     return;
   }
 
   const p = data.patient;
-  document.getElementById('briefName').textContent = p.name;
-  let meta = p.phone;
-  if (p.age) meta += '  |  Age ' + p.age;
-  if (p.gender) meta += '  |  ' + p.gender;
-  document.getElementById('briefMeta').textContent = meta;
-  document.getElementById('briefSummary').textContent = data.summary;
+  document.getElementById('bName').textContent = p.name;
+  let line = p.phone;
+  if (p.age) line += ', age ' + p.age;
+  if (p.gender) line += ', ' + p.gender;
+  document.getElementById('bId').textContent = line;
+  document.getElementById('bSaid').textContent = data.summary;
 
-  const hist = document.getElementById('briefHistory');
-  if (!data.visit_history || data.visit_history.length === 0) {
-    hist.innerHTML = '<div class="visit detail">First visit &mdash; no previous records</div>';
-  } else {
-    data.visit_history.forEach(v => {
-      const div = document.createElement('div');
-      div.className = 'visit';
-      const doc = v.doctors ? v.doctors.name : '';
-      div.innerHTML = '<div class="date">' + v.appointment_date + ' &middot; ' + v.status + '</div>' +
-                      '<div class="detail">' + (v.reason || 'no reason recorded') +
-                      (doc ? ' &mdash; ' + doc : '') + '</div>';
-      hist.appendChild(div);
-    });
+  const box = document.getElementById('bVisits');
+  const past = data.visit_history || [];
+  if (!past.length) {
+    box.innerHTML = '<div class="visit x">No earlier visits on record.</div>';
+    return;
   }
+  past.forEach(v => {
+    const el = document.createElement('div');
+    el.className = 'visit';
+    const who = v.doctors ? v.doctors.name : '';
+    el.innerHTML = '<div class="d">' + v.appointment_date + '</div>' +
+                   '<div class="x">' + (v.reason || 'reason not recorded') +
+                   (who ? ' with ' + who : '') + ', ' + v.status + '</div>';
+    box.appendChild(el);
+  });
 }
 
-function closeBrief(event) {
-  if (event && event.target.id !== 'overlay') return;
-  document.getElementById('overlay').classList.remove('open');
+function shutBrief(e) {
+  if (e && e.target.id !== 'scrim') return;
+  document.getElementById('scrim').classList.remove('open');
 }
 
-async function nextPatient() {
-  if (!doctorId) return;
-  await fetch('/doctor/next/' + doctorId, { method: 'POST' });
-  loadQueue();
-}
-
-async function resetQueue() {
-  if (!doctorId) return;
-  if (!confirm('Reset the queue back to 0?')) return;
-  await fetch('/doctor/reset/' + doctorId, { method: 'POST' });
-  loadQueue();
-}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') document.getElementById('scrim').classList.remove('open');
+});
 
 loadDoctors();
-setInterval(loadQueue, 30000);   // auto refresh every 30s
+setInterval(loadQueue, 30000);
 </script>
 </body>
 </html>
