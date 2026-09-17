@@ -641,7 +641,7 @@ def get_queue_info(doctor_id: int):
 
         appointments = (
             supabase.table("appointments")
-            .select("serial_number, reason, status, patients(name, phone)")
+            .select("id, patient_id, serial_number, reason, status, patients(name, phone)")
             .eq("doctor_id", doctor_id)
             .eq("appointment_date", today)
             .eq("status", "booked")
@@ -709,6 +709,102 @@ def reset_queue(doctor_id: int):
         return {"status": "error", "message": str(e)}
 
 
+@app.get("/doctor/patient-brief/{patient_id}")
+def patient_brief(patient_id: int):
+    """everything the doctor needs to know before calling this patient in:
+    their basic info, past visits, and a short AI summary of what they told the assistant.
+    """
+    try:
+        patient_result = supabase.table("patients").select("*").eq("id", patient_id).execute()
+        if not patient_result.data:
+            return {"status": "error", "message": "Patient not found"}
+        patient = patient_result.data[0]
+
+        # past visits (most recent first)
+        history_result = (
+            supabase.table("appointments")
+            .select("appointment_date, appointment_time, reason, status, doctors(name)")
+            .eq("patient_id", patient_id)
+            .order("appointment_date", desc=True)
+            .limit(10)
+            .execute()
+        )
+
+        # what did they actually say to the assistant?
+        messages_result = (
+            supabase.table("conversation_messages")
+            .select("role, content")
+            .eq("session_id", patient["phone"])
+            .order("created_at", desc=True)
+            .limit(20)
+            .execute()
+        )
+        recent_messages = list(reversed(messages_result.data))
+
+        summary = generate_patient_summary(patient, recent_messages)
+
+        return {
+            "status": "success",
+            "patient": {
+                "name": patient["name"],
+                "phone": patient["phone"],
+                "age": patient.get("age"),
+                "gender": patient.get("gender"),
+                "notes": patient.get("notes"),
+            },
+            "visit_history": history_result.data,
+            "summary": summary,
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def generate_patient_summary(patient: dict, messages: list) -> str:
+    """asks the AI to turn the patient's chat into a short brief for the doctor.
+    NOTE: this is context only - it is not a diagnosis and must never read like one.
+    """
+    if not messages:
+        return "No conversation history available for this patient."
+
+    # flatten the conversation into plain text for the summariser
+    transcript_lines = []
+    for m in messages:
+        speaker = "Patient" if m["role"] == "user" else "Assistant"
+        transcript_lines.append(f"{speaker}: {m['content']}")
+    transcript = "\n".join(transcript_lines)
+
+    prompt = f"""You are preparing a short pre-consultation brief for a doctor in Bangladesh.
+
+Below is a conversation between a patient and the clinic's booking assistant.
+
+Patient name: {patient.get('name')}
+Age: {patient.get('age') or 'not recorded'}
+
+Conversation:
+{transcript}
+
+Write a brief of at most 4 short bullet points covering ONLY what the patient actually said:
+their stated complaint, how long it has been going on (if mentioned), and anything else
+they volunteered that the doctor should know before walking in.
+
+Strict rules:
+- Do NOT diagnose, do NOT suggest tests, do NOT suggest treatment.
+- Do NOT invent any detail that is not in the conversation.
+- If something was not mentioned, simply leave it out.
+- Write in Bangla.
+"""
+
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL_NAME,
+            contents=prompt,
+        )
+        return response.text
+    except Exception as e:
+        print(f"[Summary ERROR] {e}")
+        return "Summary could not be generated right now."
+
+
 DOCTOR_PAGE_HTML = """
 <!DOCTYPE html>
 <html>
@@ -740,6 +836,29 @@ DOCTOR_PAGE_HTML = """
   th { color: #666; font-weight: 600; }
   .now { background: #e3f2fd; font-weight: 600; }
   .done { color: #aaa; text-decoration: line-through; }
+  tbody tr { cursor: pointer; }
+  tbody tr:active { background: #f0f0f0; }
+  .hint { color: #999; font-size: 12px; margin-top: 10px; }
+
+  /* patient brief panel */
+  .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45);
+             display: none; align-items: flex-end; justify-content: center; }
+  .overlay.open { display: flex; }
+  .sheet { background: #fff; width: 100%; max-width: 480px; max-height: 88vh;
+           overflow-y: auto; border-radius: 16px 16px 0 0; padding: 22px; }
+  .sheet h3 { margin: 0 0 2px; font-size: 19px; }
+  .sheet .meta { color: #666; font-size: 14px; margin-bottom: 16px; }
+  .section-title { font-size: 13px; font-weight: 700; color: #1976d2;
+                   text-transform: uppercase; letter-spacing: .4px;
+                   margin: 20px 0 8px; }
+  .summary-box { background: #f4f8fd; border-left: 3px solid #1976d2;
+                 padding: 12px 14px; border-radius: 6px; font-size: 14px;
+                 line-height: 1.65; white-space: pre-wrap; }
+  .visit { border-bottom: 1px solid #eee; padding: 9px 0; font-size: 14px; }
+  .visit .date { font-weight: 600; }
+  .visit .detail { color: #666; font-size: 13px; }
+  .close-btn { background: #eee; color: #333; margin-top: 18px; }
+  .disclaimer { color: #999; font-size: 11px; margin-top: 8px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -767,8 +886,28 @@ DOCTOR_PAGE_HTML = """
       <thead><tr><th>#</th><th>Name</th><th>Reason</th></tr></thead>
       <tbody id="patientList"></tbody>
     </table>
+    <div class="hint">Tap a patient to see their brief</div>
   </div>
 
+</div>
+
+<div class="overlay" id="overlay" onclick="closeBrief(event)">
+  <div class="sheet" onclick="event.stopPropagation()">
+    <h3 id="briefName">-</h3>
+    <div class="meta" id="briefMeta"></div>
+
+    <div class="section-title">Summary</div>
+    <div class="summary-box" id="briefSummary">Loading...</div>
+    <div class="disclaimer">
+      Auto-generated from what the patient wrote to the assistant.
+      Context only &mdash; not a diagnosis.
+    </div>
+
+    <div class="section-title">Previous visits</div>
+    <div id="briefHistory"></div>
+
+    <button class="close-btn" onclick="closeBrief()">Close</button>
+  </div>
 </div>
 
 <script>
@@ -819,8 +958,53 @@ async function loadQueue() {
     tr.innerHTML = '<td>' + (p.serial_number || '-') + '</td>' +
                    '<td>' + (p.patients ? p.patients.name : '-') + '</td>' +
                    '<td>' + (p.reason || '-') + '</td>';
+    tr.onclick = () => openBrief(p.patient_id);
     tbody.appendChild(tr);
   });
+}
+
+async function openBrief(patientId) {
+  if (!patientId) return;
+  document.getElementById('overlay').classList.add('open');
+  document.getElementById('briefName').textContent = 'Loading...';
+  document.getElementById('briefMeta').textContent = '';
+  document.getElementById('briefSummary').textContent = 'Preparing summary...';
+  document.getElementById('briefHistory').innerHTML = '';
+
+  const res = await fetch('/doctor/patient-brief/' + patientId);
+  const data = await res.json();
+  if (data.status !== 'success') {
+    document.getElementById('briefSummary').textContent = 'Could not load this patient.';
+    return;
+  }
+
+  const p = data.patient;
+  document.getElementById('briefName').textContent = p.name;
+  let meta = p.phone;
+  if (p.age) meta += '  |  Age ' + p.age;
+  if (p.gender) meta += '  |  ' + p.gender;
+  document.getElementById('briefMeta').textContent = meta;
+  document.getElementById('briefSummary').textContent = data.summary;
+
+  const hist = document.getElementById('briefHistory');
+  if (!data.visit_history || data.visit_history.length === 0) {
+    hist.innerHTML = '<div class="visit detail">First visit &mdash; no previous records</div>';
+  } else {
+    data.visit_history.forEach(v => {
+      const div = document.createElement('div');
+      div.className = 'visit';
+      const doc = v.doctors ? v.doctors.name : '';
+      div.innerHTML = '<div class="date">' + v.appointment_date + ' &middot; ' + v.status + '</div>' +
+                      '<div class="detail">' + (v.reason || 'no reason recorded') +
+                      (doc ? ' &mdash; ' + doc : '') + '</div>';
+      hist.appendChild(div);
+    });
+  }
+}
+
+function closeBrief(event) {
+  if (event && event.target.id !== 'overlay') return;
+  document.getElementById('overlay').classList.remove('open');
 }
 
 async function nextPatient() {
