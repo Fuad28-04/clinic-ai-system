@@ -1,6 +1,6 @@
 import os
 import httpx
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -690,7 +690,7 @@ def get_queue_info(doctor_id: int):
 
         appointments = (
             supabase.table("appointments")
-            .select("id, patient_id, serial_number, reason, status, patients(name, phone)")
+            .select("id, patient_id, serial_number, reason, status, follow_up_date, patients(name, phone)")
             .eq("doctor_id", doctor_id)
             .eq("appointment_date", today)
             .eq("status", "booked")
@@ -739,6 +739,50 @@ def next_patient(doctor_id: int):
         ).execute()
 
         return {"status": "success", "current_serial": new_serial}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+class FollowUpRequest(BaseModel):
+    # how many days from today the patient should come back.
+    # null means "no follow-up needed" and clears whatever was set before.
+    days: int | None = None
+
+
+@app.post("/doctor/follow-up/{doctor_id}")
+def set_follow_up(doctor_id: int, request: FollowUpRequest):
+    """the doctor sets a return date for the patient who is with them right now.
+    done from the queue page, before pressing "call next patient".
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        queue = get_or_create_queue(doctor_id, today)
+        current = queue["current_serial"]
+        if current == 0:
+            return {"status": "error", "message": "No patient is with the doctor yet"}
+
+        follow_up_date = None
+        if request.days is not None:
+            if request.days < 1 or request.days > 730:
+                return {"status": "error", "message": "Days must be between 1 and 730"}
+            follow_up_date = (datetime.now() + timedelta(days=request.days)).strftime("%Y-%m-%d")
+
+        updated = (
+            supabase.table("appointments")
+            .update({"follow_up_date": follow_up_date, "follow_up_sent": False})
+            .eq("doctor_id", doctor_id)
+            .eq("appointment_date", today)
+            .eq("serial_number", current)
+            .execute()
+        )
+        if not updated.data:
+            return {"status": "error", "message": "Could not find that appointment"}
+
+        return {
+            "status": "success",
+            "serial_number": current,
+            "follow_up_date": follow_up_date,
+        }
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -901,6 +945,33 @@ DOCTOR_PAGE_HTML = """
     border-radius: 8px;
   }
 
+  /* ---------- follow-up for the patient in the room ---------- */
+  .inroom {
+    background: var(--surface); border-radius: 14px;
+    padding: 18px 20px; margin-bottom: 14px;
+  }
+  .inroom .with { font-size: 14px; color: var(--ink-soft); margin-bottom: 3px; }
+  .inroom .pname { font-size: 18px; font-weight: 600; margin-bottom: 14px; }
+  .inroom .ask { font-size: 14px; color: var(--ink-soft); margin-bottom: 9px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    padding: 8px 13px; font-size: 14px; font-weight: 500;
+    background: var(--bg); color: var(--ink);
+    border: 1px solid transparent; border-radius: 20px;
+  }
+  .chip:active { background: #DDE4E5; }
+  .chip.picked { background: var(--accent); color: #fff; }
+  .chip.none.picked { background: var(--ink-soft); }
+  .fu-note { font-size: 13px; color: var(--accent-d); margin-top: 11px; min-height: 19px; }
+  .fu-custom { margin-top: 10px; display: flex; gap: 8px; align-items: center; }
+  .fu-custom input {
+    flex: 1; padding: 9px 10px; font-family: inherit; font-size: 15px;
+    border: 1px solid var(--line); border-radius: 8px; color: var(--ink);
+  }
+  .fu-custom button {
+    padding: 9px 14px; font-size: 14px; background: var(--bg); color: var(--ink);
+  }
+
   /* ---------- the hero: who walks in next ---------- */
   .oncall {
     background: var(--surface); border-radius: 14px;
@@ -995,10 +1066,11 @@ DOCTOR_PAGE_HTML = """
     .shell {
       max-width: 1040px; display: grid; gap: 22px;
       grid-template-columns: 420px 1fr;
-      grid-template-areas: "pick brief" "call brief" "strip brief" "list brief";
+      grid-template-areas: "pick brief" "room brief" "call brief" "strip brief" "list brief";
       align-content: start; padding-top: 28px;
     }
     .picker { grid-area: pick; margin-bottom: 0; }
+    .inroom { grid-area: room; margin-bottom: 0; }
     .oncall { grid-area: call; margin-bottom: 0; }
     .strip  { grid-area: strip; margin-bottom: 0; }
     .list   { grid-area: list; }
@@ -1033,6 +1105,24 @@ DOCTOR_PAGE_HTML = """
     <label for="doc">Chamber</label>
     <select id="doc" onchange="loadQueue()"></select>
   </div>
+
+  <section class="inroom" id="inroom" style="display:none;">
+    <div class="with">With you now</div>
+    <div class="pname" id="inroomName"></div>
+    <div class="ask">Come back after</div>
+    <div class="chips" id="fuChips">
+      <button class="chip none" data-days="" onclick="setFollowUp(null, this)">Not needed</button>
+      <button class="chip" data-days="7" onclick="setFollowUp(7, this)">1 week</button>
+      <button class="chip" data-days="15" onclick="setFollowUp(15, this)">15 days</button>
+      <button class="chip" data-days="30" onclick="setFollowUp(30, this)">1 month</button>
+      <button class="chip" data-days="90" onclick="setFollowUp(90, this)">3 months</button>
+    </div>
+    <div class="fu-custom">
+      <input id="fuDays" type="number" min="1" max="730" placeholder="or type days">
+      <button onclick="setCustomFollowUp()">Set</button>
+    </div>
+    <div class="fu-note" id="fuNote"></div>
+  </section>
 
   <section class="oncall">
     <div class="cue" id="cue">Next in</div>
@@ -1103,6 +1193,9 @@ async function loadQueue() {
 
   const waiting = queue.filter(p => p.serial_number > running);
   const upNext = waiting.length ? waiting[0] : null;
+  const inRoom = queue.find(p => p.serial_number === running) || null;
+
+  drawInRoom(inRoom);
 
   document.getElementById('nowNum').textContent = running === 0 ? 'none yet' : running;
   document.getElementById('leftNum').textContent = waiting.length;
@@ -1128,6 +1221,68 @@ async function loadQueue() {
   }
 
   drawRows();
+}
+
+function drawInRoom(p) {
+  const card = document.getElementById('inroom');
+  if (!p) { card.style.display = 'none'; return; }
+
+  card.style.display = '';
+  document.getElementById('inroomName').textContent =
+      p.serial_number + '  \\u00b7  ' + (p.patients ? p.patients.name : 'Unnamed');
+  document.getElementById('fuDays').value = '';
+
+  // reflect whatever is already saved for this patient
+  const chips = document.querySelectorAll('#fuChips .chip');
+  chips.forEach(c => c.classList.remove('picked'));
+  const note = document.getElementById('fuNote');
+
+  if (p.follow_up_date) {
+    note.textContent = 'Return visit set for ' + p.follow_up_date;
+    const days = Math.round(
+      (new Date(p.follow_up_date) - new Date(new Date().toDateString())) / 86400000
+    );
+    chips.forEach(c => { if (c.dataset.days === String(days)) c.classList.add('picked'); });
+  } else {
+    note.textContent = '';
+  }
+}
+
+async function setFollowUp(days, chipEl) {
+  if (!docId) return;
+  const res = await fetch('/doctor/follow-up/' + docId, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ days: days })
+  });
+  const data = await res.json();
+  const note = document.getElementById('fuNote');
+
+  if (data.status !== 'success') {
+    note.textContent = data.message || 'Could not save that.';
+    return;
+  }
+
+  document.querySelectorAll('#fuChips .chip').forEach(c => c.classList.remove('picked'));
+  if (chipEl) chipEl.classList.add('picked');
+
+  note.textContent = data.follow_up_date
+      ? 'Return visit set for ' + data.follow_up_date
+      : 'No return visit needed';
+
+  // keep our local copy in step so a refresh doesn't wipe the display
+  const p = queue.find(x => x.serial_number === running);
+  if (p) p.follow_up_date = data.follow_up_date;
+}
+
+function setCustomFollowUp() {
+  const box = document.getElementById('fuDays');
+  const days = parseInt(box.value, 10);
+  if (!days || days < 1 || days > 730) {
+    document.getElementById('fuNote').textContent = 'Enter a number of days between 1 and 730.';
+    return;
+  }
+  setFollowUp(days, null);
 }
 
 function drawRows() {
