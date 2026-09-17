@@ -34,7 +34,7 @@ app = FastAPI()
 @app.get("/")
 def home():
     """just to check if the server is running or not"""
-    return {"message": "Clinic AI Backend is running! ✅"}
+    return {"message": "Clinic AI Backend is running!"}
 
 
 PRIVACY_POLICY_HTML = """
@@ -116,7 +116,7 @@ def test_database():
         result = supabase.table("doctors").select("*").execute()
         return {
             "status": "success",
-            "message": "Database connection is working ✅",
+            "message": "Database connection is working",
             "doctors": result.data
         }
     except Exception as e:
@@ -133,7 +133,7 @@ def test_ai():
         )
         return {
             "status": "success",
-            "message": "Gemini AI connection is working ✅",
+            "message": "Gemini AI connection is working",
             "ai_response": response.text
         }
     except Exception as e:
@@ -380,6 +380,10 @@ Patients will message you in Bangla, English, or mixed (Banglish).
 Today's date is {datetime.now().strftime('%Y-%m-%d')}.
 
 IMPORTANT RULES:
+- ALWAYS reply in the same language the patient wrote to you in. If they write in Bangla,
+  reply in Bangla. If English, reply in English. If Banglish (Bangla in Latin letters),
+  reply in Banglish. Same for any other language - Hindi, Arabic, Spanish, anything.
+  Never switch languages on your own; follow the patient's lead every single message.
 - NEVER make up doctor schedules, fees, or availability. Always use the tools to get real data.
 - To book an appointment, you MUST collect: patient name, phone number, doctor name,
   preferred date, preferred time, and reason for visit. Ask for anything missing before booking.
@@ -530,6 +534,54 @@ def send_whatsapp_message(to_phone_number: str, message_text: str):
         return None
 
 
+def build_unsupported_message(session_id: str) -> str:
+    """when someone sends a voice note / image / sticker, we can't read it.
+    we still want to reply in THEIR language, but a voice note gives us no text
+    to detect language from - so we look at what they wrote earlier instead.
+    if they've never written anything, we fall back to a bilingual message.
+    """
+    try:
+        result = (
+            supabase.table("conversation_messages")
+            .select("content")
+            .eq("session_id", session_id)
+            .eq("role", "user")
+            .order("created_at", desc=True)
+            .limit(3)
+            .execute()
+        )
+    except Exception:
+        result = None
+
+    # never written to us before -> cover the two most likely languages
+    if not result or not result.data:
+        return ("দুঃখিত, এখন শুধু টেক্সট মেসেজ বুঝতে পারি। অনুগ্রহ করে লিখে জানান।\n\n"
+                "Sorry, I can only read text messages right now. Please type your message.")
+
+    past_text = "\n".join(row["content"] for row in result.data)
+
+    prompt = f"""Here are the most recent messages a person sent to a clinic assistant:
+
+{past_text}
+
+Write a single short, polite sentence telling them that the assistant can only read
+text messages at the moment, and asking them to type their message instead.
+
+Write it in the SAME language and script they used above. Output only that sentence,
+nothing else."""
+
+    try:
+        response = gemini_client.models.generate_content(
+            model=GEMINI_MODEL_NAME,
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"[Unsupported msg ERROR] {e}")
+        return ("দুঃখিত, এখন শুধু টেক্সট মেসেজ বুঝতে পারি।\n"
+                "Sorry, I can only read text messages right now.")
+
+
 @app.get("/webhook")
 def verify_webhook(request: Request):
     """meta hits this once when we set up the webhook, to check we own this server.
@@ -581,10 +633,7 @@ async def receive_whatsapp_message(request: Request):
 
         # for now we only handle plain text messages
         if message_type != "text":
-            send_whatsapp_message(
-                sender_phone,
-                "দুঃখিত, এখন শুধু টেক্সট মেসেজ বুঝতে পারি। অনুগ্রহ করে লিখে জানান।"
-            )
+            send_whatsapp_message(sender_phone, build_unsupported_message(sender_phone))
             return {"status": "ok"}
 
         patient_text = message["text"]["body"]
