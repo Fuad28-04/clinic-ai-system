@@ -20,6 +20,13 @@ WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
 WHATSAPP_VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN")
 
+# the approved template we use to reach patients outside the 24h window
+FOLLOW_UP_TEMPLATE_NAME = "follow_up_reminder"
+FOLLOW_UP_TEMPLATE_LANG = "bn"
+
+# a shared secret so only our scheduler can trigger the daily reminder run
+CRON_SECRET = os.getenv("CRON_SECRET", "change-me")
+
 # setting up Gemini AI (new SDK, old google.generativeai package is deprecated now)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 GEMINI_MODEL_NAME = "gemini-3.6-flash"
@@ -896,6 +903,119 @@ Strict rules:
     except Exception as e:
         print(f"[Summary ERROR] {e}")
         return "Summary could not be generated right now."
+
+
+# ==========================================================
+# FOLLOW-UP REMINDERS
+# whatsapp only lets us message a patient freely for 24h after THEY write to us.
+# a follow-up is weeks later, so we have to use an approved template instead.
+# once the patient replies to the template, the normal AI chat takes over again.
+# ==========================================================
+
+def send_whatsapp_template(to_phone_number: str, patient_name: str, doctor_name: str):
+    """sends the approved follow-up template to one patient"""
+    url = f"https://graph.facebook.com/v21.0/{WHATSAPP_PHONE_NUMBER_ID}/messages"
+    headers = {
+        "Authorization": f"Bearer {WHATSAPP_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to_phone_number,
+        "type": "template",
+        "template": {
+            "name": FOLLOW_UP_TEMPLATE_NAME,
+            "language": {"code": FOLLOW_UP_TEMPLATE_LANG},
+            "components": [{
+                "type": "body",
+                "parameters": [
+                    {"type": "text", "text": patient_name},
+                    {"type": "text", "text": doctor_name},
+                ],
+            }],
+        },
+    }
+    try:
+        response = httpx.post(url, headers=headers, json=payload, timeout=30)
+        print(f"[Template send] to={to_phone_number} status={response.status_code} body={response.text}")
+        return response.status_code == 200
+    except Exception as e:
+        print(f"[Template send ERROR] {e}")
+        return False
+
+
+@app.post("/tasks/send-follow-ups")
+def send_follow_ups(request: Request):
+    """runs once a day. finds everyone whose follow-up date is today and messages them.
+    protected by a secret so nobody else can trigger it.
+    """
+    if request.headers.get("x-cron-secret") != CRON_SECRET:
+        return Response(content="Not allowed", status_code=403)
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    sent, failed, skipped = 0, 0, 0
+
+    try:
+        due = (
+            supabase.table("appointments")
+            .select("id, follow_up_date, patients(name, phone), doctors(name)")
+            .eq("follow_up_date", today)
+            .eq("follow_up_sent", False)
+            .execute()
+        )
+
+        for row in due.data:
+            patient = row.get("patients")
+            doctor = row.get("doctors")
+
+            # a patient with no phone on file can't be reached
+            if not patient or not patient.get("phone"):
+                skipped += 1
+                continue
+
+            ok = send_whatsapp_template(
+                patient["phone"],
+                patient.get("name") or "রোগী",
+                (doctor or {}).get("name") or "ডাক্তার",
+            )
+
+            if ok:
+                # mark it straight away so a retry never double-messages anyone
+                supabase.table("appointments").update(
+                    {"follow_up_sent": True}
+                ).eq("id", row["id"]).execute()
+                sent += 1
+            else:
+                failed += 1
+
+        print(f"[Follow-ups] date={today} sent={sent} failed={failed} skipped={skipped}")
+        return {
+            "status": "success",
+            "date": today,
+            "due": len(due.data),
+            "sent": sent,
+            "failed": failed,
+            "skipped": skipped,
+        }
+    except Exception as e:
+        print(f"[Follow-ups ERROR] {e}")
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/tasks/follow-ups-due")
+def follow_ups_due():
+    """read-only peek at who is due today - handy for checking before the job runs"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        due = (
+            supabase.table("appointments")
+            .select("follow_up_date, follow_up_sent, patients(name, phone), doctors(name)")
+            .eq("follow_up_date", today)
+            .execute()
+        )
+        return {"status": "success", "date": today, "count": len(due.data), "rows": due.data}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 DOCTOR_PAGE_HTML = """
