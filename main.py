@@ -1174,6 +1174,11 @@ DOCTOR_PAGE_HTML = """
     font-size: 15px; line-height: 1.7; white-space: pre-wrap;
   }
   .caveat { color: var(--ink-soft); font-size: 12px; margin-top: 8px; line-height: 1.5; }
+  .onfile {
+    background: var(--warn-bg); border-left: 3px solid #C9A227;
+    border-radius: 0 8px 8px 0; padding: 14px 16px;
+    font-size: 15px; line-height: 1.7; white-space: pre-wrap;
+  }
   .visit { padding: 10px 0; border-top: 1px solid var(--line); font-size: 15px; }
   .visit:first-of-type { border-top: none; }
   .visit .d { font-weight: 500; }
@@ -1275,6 +1280,11 @@ DOCTOR_PAGE_HTML = """
   <div class="brief" onclick="event.stopPropagation()">
     <h3 id="bName">&nbsp;</h3>
     <div class="id" id="bId"></div>
+
+    <div id="bNotesWrap" style="display:none;">
+      <h4>On file</h4>
+      <div class="onfile" id="bNotes"></div>
+    </div>
 
     <h4>What they told the assistant</h4>
     <div class="said" id="bSaid">Loading</div>
@@ -1470,6 +1480,7 @@ async function openBrief(patientId) {
   document.getElementById('bId').textContent = '';
   document.getElementById('bSaid').textContent = 'Reading their messages';
   document.getElementById('bVisits').innerHTML = '';
+  document.getElementById('bNotesWrap').style.display = 'none';
 
   const res = await fetch('/doctor/patient-brief/' + patientId);
   const data = await res.json();
@@ -1486,6 +1497,14 @@ async function openBrief(patientId) {
   if (p.age) line += ', age ' + p.age;
   if (p.gender) line += ', ' + p.gender;
   document.getElementById('bId').textContent = line;
+
+  // standing notes: allergies, chronic conditions, past surgery.
+  // shown above the chat summary because it outranks anything said today.
+  if (p.notes && p.notes.trim()) {
+    document.getElementById('bNotes').textContent = p.notes;
+    document.getElementById('bNotesWrap').style.display = '';
+  }
+
   document.getElementById('bSaid').textContent = data.summary;
 
   const box = document.getElementById('bVisits');
