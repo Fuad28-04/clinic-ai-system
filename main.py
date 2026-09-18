@@ -1268,9 +1268,10 @@ DOCTOR_PAGE_HTML = """
     <div id="rows"></div>
   </div>
 
-</div>
-
-<div class="scrim" id="scrim" onclick="shutBrief(event)">
+  <!-- kept INSIDE .shell so it can sit in the grid's right-hand column on
+       desktop. on phones it is position:fixed, so nesting makes no difference
+       there. -->
+  <div class="scrim" id="scrim" onclick="shutBrief(event)">
   <div class="brief" onclick="event.stopPropagation()">
     <h3 id="bName">&nbsp;</h3>
     <div class="id" id="bId"></div>
@@ -1283,7 +1284,9 @@ DOCTOR_PAGE_HTML = """
     <div id="bVisits"></div>
 
     <button class="shut" onclick="shutBrief()">Close</button>
+    </div>
   </div>
+
 </div>
 
 <script>
