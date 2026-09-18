@@ -810,7 +810,7 @@ def reset_queue(doctor_id: int):
 
 
 @app.get("/doctor/patient-brief/{patient_id}")
-def patient_brief(patient_id: int):
+def patient_brief(patient_id: int, lang: str = "bn"):
     """everything the doctor needs to know before calling this patient in:
     their basic info, past visits, and a short AI summary of what they told the assistant.
     """
@@ -841,7 +841,7 @@ def patient_brief(patient_id: int):
         )
         recent_messages = list(reversed(messages_result.data))
 
-        summary = generate_patient_summary(patient, recent_messages)
+        summary = generate_patient_summary(patient, recent_messages, lang)
 
         return {
             "status": "success",
@@ -859,12 +859,14 @@ def patient_brief(patient_id: int):
         return {"status": "error", "message": str(e)}
 
 
-def generate_patient_summary(patient: dict, messages: list) -> str:
+def generate_patient_summary(patient: dict, messages: list, lang: str = "bn") -> str:
     """asks the AI to turn the patient's chat into a short brief for the doctor.
+    lang follows whichever language the doctor has the interface set to.
     NOTE: this is context only - it is not a diagnosis and must never read like one.
     """
     if not messages:
-        return "No conversation history available for this patient."
+        return ("এই রোগীর কোনো কথোপকথন পাওয়া যায়নি।" if lang == "bn"
+                else "No conversation history available for this patient.")
 
     # flatten the conversation into plain text for the summariser
     transcript_lines = []
@@ -891,7 +893,7 @@ Strict rules:
 - Do NOT diagnose, do NOT suggest tests, do NOT suggest treatment.
 - Do NOT invent any detail that is not in the conversation.
 - If something was not mentioned, simply leave it out.
-- Write in Bangla.
+- Write in {"Bangla" if lang == "bn" else "English"}.
 """
 
     try:
@@ -1185,15 +1187,27 @@ DOCTOR_PAGE_HTML = """
   .visit .x { color: var(--ink-soft); font-size: 14px; }
   .shut { width: 100%; margin-top: 20px; padding: 13px;
           background: var(--bg); color: var(--ink); }
+  .hintbox { display: none; }
+
+  /* ---------- language toggle ---------- */
+  .topbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+  .langs { display: inline-flex; background: var(--surface);
+           border-radius: 20px; padding: 3px; }
+  .langs button {
+    padding: 6px 14px; font-size: 14px; font-weight: 500;
+    background: none; color: var(--ink-soft); border-radius: 17px;
+  }
+  .langs button.on { background: var(--accent); color: #fff; }
 
   /* ---------- desktop: brief lives beside the queue ---------- */
   @media (min-width: 900px) {
     .shell {
       max-width: 1040px; display: grid; gap: 22px;
       grid-template-columns: 420px 1fr;
-      grid-template-areas: "pick brief" "room brief" "call brief" "strip brief" "list brief";
+      grid-template-areas: "top top" "pick brief" "room brief" "call brief" "strip brief" "list brief";
       align-content: start; padding-top: 28px;
     }
+    .topbar { grid-area: top; margin-bottom: 0; }
     .picker { grid-area: pick; margin-bottom: 0; }
     .inroom { grid-area: room; margin-bottom: 0; }
     .oncall { grid-area: call; margin-bottom: 0; }
@@ -1213,8 +1227,7 @@ DOCTOR_PAGE_HTML = """
       padding: 26px 24px; position: sticky; top: 28px;
     }
     .scrim:not(.open) .brief { display: none; }
-    .scrim:not(.open)::before {
-      content: "Pick a patient to read their notes";
+    .scrim:not(.open) .hintbox {
       display: block; color: var(--ink-soft); font-size: 15px;
       padding: 26px 24px; background: var(--surface); border-radius: 14px;
     }
@@ -1230,46 +1243,54 @@ DOCTOR_PAGE_HTML = """
 
 <div class="shell">
 
+  <div class="topbar">
+    <div class="langs">
+      <button id="langBn" onclick="setLang('bn')">বাংলা</button>
+      <button id="langEn" onclick="setLang('en')">English</button>
+    </div>
+  </div>
+
   <div class="picker">
-    <label for="doc">Chamber</label>
+    <label for="doc" id="lblChamber"></label>
     <select id="doc" onchange="loadQueue()"></select>
   </div>
 
   <section class="inroom" id="inroom" style="display:none;">
-    <div class="with">With you now</div>
+    <div class="with" id="lblWith"></div>
     <div class="pname" id="inroomName"></div>
-    <div class="ask">Come back after</div>
+    <div class="ask" id="lblComeBack"></div>
     <div class="chips" id="fuChips">
-      <button class="chip none" data-days="" onclick="setFollowUp(null, this)">Not needed</button>
-      <button class="chip" data-days="7" onclick="setFollowUp(7, this)">1 week</button>
-      <button class="chip" data-days="15" onclick="setFollowUp(15, this)">15 days</button>
-      <button class="chip" data-days="30" onclick="setFollowUp(30, this)">1 month</button>
-      <button class="chip" data-days="90" onclick="setFollowUp(90, this)">3 months</button>
+      <button class="chip none" data-days="" onclick="setFollowUp(null, this)" id="fu0"></button>
+      <button class="chip" data-days="7" onclick="setFollowUp(7, this)" id="fu7"></button>
+      <button class="chip" data-days="15" onclick="setFollowUp(15, this)" id="fu15"></button>
+      <button class="chip" data-days="30" onclick="setFollowUp(30, this)" id="fu30"></button>
+      <button class="chip" data-days="90" onclick="setFollowUp(90, this)" id="fu90"></button>
     </div>
     <div class="fu-custom">
-      <input id="fuDays" type="number" min="1" max="730" placeholder="or type days">
-      <button onclick="setCustomFollowUp()">Set</button>
+      <input id="fuDays" type="number" min="1" max="730">
+      <button onclick="setCustomFollowUp()" id="lblSet"></button>
     </div>
     <div class="fu-note" id="fuNote"></div>
   </section>
 
   <section class="oncall">
-    <div class="cue" id="cue">Next in</div>
+    <div class="cue" id="cue"></div>
     <div class="who">
       <div class="num" id="nextNum">&mdash;</div>
-      <div class="name" id="nextName">Nobody waiting</div>
+      <div class="name" id="nextName"></div>
     </div>
     <div class="why" id="nextWhy"></div>
-    <button class="call" id="callBtn" onclick="callNext()">Call next patient</button>
+    <button class="call" id="callBtn" onclick="callNext()"></button>
   </section>
 
   <div class="strip">
-    <span>Now with you: <b id="nowNum">none yet</b></span>
-    <span><b id="leftNum">0</b> still waiting</span>
+    <span><span id="lblNowWith"></span> <b id="nowNum"></b></span>
+    <span><b id="leftNum">0</b> <span id="lblWaiting"></span></span>
   </div>
 
   <div class="list">
-    <h2>Today&rsquo;s list <button class="undo" onclick="resetQueue()">start over</button></h2>
+    <h2><span id="lblTodayList"></span>
+        <button class="undo" onclick="resetQueue()" id="lblStartOver"></button></h2>
     <div id="rows"></div>
   </div>
 
@@ -1277,32 +1298,172 @@ DOCTOR_PAGE_HTML = """
        desktop. on phones it is position:fixed, so nesting makes no difference
        there. -->
   <div class="scrim" id="scrim" onclick="shutBrief(event)">
-  <div class="brief" onclick="event.stopPropagation()">
-    <h3 id="bName">&nbsp;</h3>
-    <div class="id" id="bId"></div>
+    <div class="hintbox" id="hintbox"></div>
+    <div class="brief" onclick="event.stopPropagation()">
+      <h3 id="bName">&nbsp;</h3>
+      <div class="id" id="bId"></div>
 
-    <div id="bNotesWrap" style="display:none;">
-      <h4>On file</h4>
-      <div class="onfile" id="bNotes"></div>
-    </div>
+      <div id="bNotesWrap" style="display:none;">
+        <h4 id="lblOnFile"></h4>
+        <div class="onfile" id="bNotes"></div>
+      </div>
 
-    <h4>What they told the assistant</h4>
-    <div class="said" id="bSaid">Loading</div>
-    <p class="caveat">Written from the patient&rsquo;s own words. Background only, not a clinical opinion.</p>
+      <h4 id="lblTold"></h4>
+      <div class="said" id="bSaid"></div>
+      <p class="caveat" id="lblCaveat"></p>
 
-    <h4>Earlier visits</h4>
-    <div id="bVisits"></div>
+      <h4 id="lblEarlier"></h4>
+      <div id="bVisits"></div>
 
-    <button class="shut" onclick="shutBrief()">Close</button>
+      <button class="shut" onclick="shutBrief()" id="lblClose"></button>
     </div>
   </div>
 
 </div>
 
 <script>
+// ---------------------------------------------------------------
+// every visible string lives here, in both languages.
+// the doctor's choice is remembered in localStorage.
+// ---------------------------------------------------------------
+const STRINGS = {
+  bn: {
+    chamber: 'চেম্বার',
+    withYou: 'এখন আপনার কাছে',
+    comeBack: 'পরবর্তী সাক্ষাৎ',
+    fuNone: 'লাগবে না',
+    fu7: '১ সপ্তাহ',
+    fu15: '১৫ দিন',
+    fu30: '১ মাস',
+    fu90: '৩ মাস',
+    daysPlaceholder: 'অথবা দিন লিখুন',
+    set: 'সেট',
+    firstUp: 'প্রথম রোগী',
+    nextIn: 'পরবর্তী রোগী',
+    nobodyWaiting: 'কেউ অপেক্ষায় নেই',
+    allSeen: 'সবাইকে দেখা হয়ে গেছে',
+    nobodyToday: 'আজ কোনো রোগী নেই',
+    callNext: 'পরবর্তী রোগীকে ডাকুন',
+    listFinished: 'তালিকা শেষ',
+    nobodyToCall: 'ডাকার মতো কেউ নেই',
+    nowWith: 'এখন দেখছেন:',
+    noneYet: 'এখনো শুরু হয়নি',
+    stillWaiting: 'জন অপেক্ষায়',
+    todayList: 'আজকের তালিকা',
+    startOver: 'শুরু থেকে',
+    noAppointments: 'আজ কোনো অ্যাপয়েন্টমেন্ট নেই।',
+    pickPatient: 'রোগীর তথ্য দেখতে নাম নির্বাচন করুন',
+    onFile: 'রেকর্ডে যা আছে',
+    told: 'রোগী সহকারীকে যা বলেছেন',
+    caveat: 'রোগীর নিজের কথা থেকে তৈরি। শুধু প্রেক্ষাপট, কোনো রোগ নির্ণয় নয়।',
+    earlier: 'আগের সাক্ষাৎ',
+    close: 'বন্ধ করুন',
+    loading: 'লোড হচ্ছে',
+    reading: 'বার্তা পড়া হচ্ছে',
+    couldNotLoad: 'লোড করা যায়নি',
+    briefFailed: 'এই রোগীর তথ্য খোলা গেল না। একটু পরে আবার চেষ্টা করুন।',
+    noEarlier: 'আগের কোনো সাক্ষাতের রেকর্ড নেই।',
+    reasonMissing: 'কারণ লেখা নেই',
+    withDoctor: 'ডাক্তার:',
+    unnamed: 'নাম নেই',
+    returnSet: 'পরবর্তী সাক্ষাৎ:',
+    noReturn: 'পরবর্তী সাক্ষাৎ লাগবে না',
+    badDays: '১ থেকে ৭৩০ এর মধ্যে দিন সংখ্যা লিখুন।',
+    confirmReset: 'তালিকা কি শুরু থেকে সেট করবেন?',
+    age: 'বয়স',
+  },
+  en: {
+    chamber: 'Chamber',
+    withYou: 'With you now',
+    comeBack: 'Come back after',
+    fuNone: 'Not needed',
+    fu7: '1 week',
+    fu15: '15 days',
+    fu30: '1 month',
+    fu90: '3 months',
+    daysPlaceholder: 'or type days',
+    set: 'Set',
+    firstUp: 'First up',
+    nextIn: 'Next in',
+    nobodyWaiting: 'Nobody waiting',
+    allSeen: 'Everyone has been seen',
+    nobodyToday: 'Nobody booked today',
+    callNext: 'Call next patient',
+    listFinished: 'List finished',
+    nobodyToCall: 'Nobody to call',
+    nowWith: 'Now with you:',
+    noneYet: 'none yet',
+    stillWaiting: 'still waiting',
+    todayList: "Today's list",
+    startOver: 'start over',
+    noAppointments: 'No appointments booked for today.',
+    pickPatient: 'Pick a patient to read their notes',
+    onFile: 'On file',
+    told: 'What they told the assistant',
+    caveat: "Written from the patient's own words. Background only, not a clinical opinion.",
+    earlier: 'Earlier visits',
+    close: 'Close',
+    loading: 'Loading',
+    reading: 'Reading their messages',
+    couldNotLoad: 'Could not load',
+    briefFailed: "This patient's notes could not be opened. Try again in a moment.",
+    noEarlier: 'No earlier visits on record.',
+    reasonMissing: 'reason not recorded',
+    withDoctor: 'with',
+    unnamed: 'Unnamed',
+    returnSet: 'Return visit set for',
+    noReturn: 'No return visit needed',
+    badDays: 'Enter a number of days between 1 and 730.',
+    confirmReset: 'Set the list back to the beginning?',
+    age: 'age',
+  }
+};
+
+let lang = 'bn';
+let t = STRINGS.bn;
 let docId = null;
 let running = 0;
 let queue = [];
+let openPatientId = null;
+
+function setLang(next) {
+  lang = next;
+  t = STRINGS[next];
+  try { localStorage.setItem('clinicLang', next); } catch (e) {}
+
+  document.getElementById('langBn').classList.toggle('on', next === 'bn');
+  document.getElementById('langEn').classList.toggle('on', next === 'en');
+  document.documentElement.lang = next;
+
+  applyStaticLabels();
+  if (docId) loadQueue();
+  // a brief already on screen was written in the old language, so refetch it
+  if (openPatientId) openBrief(openPatientId);
+}
+
+function applyStaticLabels() {
+  const put = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+  put('lblChamber', t.chamber);
+  put('lblWith', t.withYou);
+  put('lblComeBack', t.comeBack);
+  put('fu0', t.fuNone);
+  put('fu7', t.fu7);
+  put('fu15', t.fu15);
+  put('fu30', t.fu30);
+  put('fu90', t.fu90);
+  put('lblSet', t.set);
+  put('lblNowWith', t.nowWith);
+  put('lblWaiting', t.stillWaiting);
+  put('lblTodayList', t.todayList);
+  put('lblStartOver', t.startOver);
+  put('hintbox', t.pickPatient);
+  put('lblOnFile', t.onFile);
+  put('lblTold', t.told);
+  put('lblCaveat', t.caveat);
+  put('lblEarlier', t.earlier);
+  put('lblClose', t.close);
+  document.getElementById('fuDays').placeholder = t.daysPlaceholder;
+}
 
 async function loadDoctors() {
   const res = await fetch('/doctors-list');
@@ -1334,27 +1495,26 @@ async function loadQueue() {
 
   drawInRoom(inRoom);
 
-  document.getElementById('nowNum').textContent = running === 0 ? 'none yet' : running;
+  document.getElementById('nowNum').textContent = running === 0 ? t.noneYet : running;
   document.getElementById('leftNum').textContent = waiting.length;
 
   const btn = document.getElementById('callBtn');
   if (upNext) {
-    document.getElementById('cue').textContent =
-        running === 0 ? 'First up' : 'Next in';
+    document.getElementById('cue').textContent = running === 0 ? t.firstUp : t.nextIn;
     document.getElementById('nextNum').textContent = upNext.serial_number;
     document.getElementById('nextName').textContent =
-        upNext.patients ? upNext.patients.name : 'Unnamed';
+        upNext.patients ? upNext.patients.name : t.unnamed;
     document.getElementById('nextWhy').textContent = upNext.reason || '';
     btn.disabled = false;
-    btn.textContent = 'Call next patient';
+    btn.textContent = t.callNext;
   } else {
-    document.getElementById('cue').textContent = 'Next in';
+    document.getElementById('cue').textContent = t.nextIn;
     document.getElementById('nextNum').textContent = '—';
     document.getElementById('nextName').textContent =
-        queue.length ? 'Everyone has been seen' : 'Nobody booked today';
+        queue.length ? t.allSeen : t.nobodyToday;
     document.getElementById('nextWhy').textContent = '';
     btn.disabled = true;
-    btn.textContent = queue.length ? 'List finished' : 'Nobody to call';
+    btn.textContent = queue.length ? t.listFinished : t.nobodyToCall;
   }
 
   drawRows();
@@ -1366,16 +1526,15 @@ function drawInRoom(p) {
 
   card.style.display = '';
   document.getElementById('inroomName').textContent =
-      p.serial_number + '  ·  ' + (p.patients ? p.patients.name : 'Unnamed');
+      p.serial_number + '  ·  ' + (p.patients ? p.patients.name : t.unnamed);
   document.getElementById('fuDays').value = '';
 
-  // reflect whatever is already saved for this patient
   const chips = document.querySelectorAll('#fuChips .chip');
   chips.forEach(c => c.classList.remove('picked'));
   const note = document.getElementById('fuNote');
 
   if (p.follow_up_date) {
-    note.textContent = 'Return visit set for ' + p.follow_up_date;
+    note.textContent = t.returnSet + ' ' + p.follow_up_date;
     const days = Math.round(
       (new Date(p.follow_up_date) - new Date(new Date().toDateString())) / 86400000
     );
@@ -1396,7 +1555,7 @@ async function setFollowUp(days, chipEl) {
   const note = document.getElementById('fuNote');
 
   if (data.status !== 'success') {
-    note.textContent = data.message || 'Could not save that.';
+    note.textContent = data.message || t.briefFailed;
     return;
   }
 
@@ -1404,19 +1563,17 @@ async function setFollowUp(days, chipEl) {
   if (chipEl) chipEl.classList.add('picked');
 
   note.textContent = data.follow_up_date
-      ? 'Return visit set for ' + data.follow_up_date
-      : 'No return visit needed';
+      ? t.returnSet + ' ' + data.follow_up_date
+      : t.noReturn;
 
-  // keep our local copy in step so a refresh doesn't wipe the display
   const p = queue.find(x => x.serial_number === running);
   if (p) p.follow_up_date = data.follow_up_date;
 }
 
 function setCustomFollowUp() {
-  const box = document.getElementById('fuDays');
-  const days = parseInt(box.value, 10);
+  const days = parseInt(document.getElementById('fuDays').value, 10);
   if (!days || days < 1 || days > 730) {
-    document.getElementById('fuNote').textContent = 'Enter a number of days between 1 and 730.';
+    document.getElementById('fuNote').textContent = t.badDays;
     return;
   }
   setFollowUp(days, null);
@@ -1426,7 +1583,10 @@ function drawRows() {
   const box = document.getElementById('rows');
   box.innerHTML = '';
   if (!queue.length) {
-    box.innerHTML = '<div class="empty">No appointments booked for today.</div>';
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = t.noAppointments;
+    box.appendChild(empty);
     return;
   }
   queue.forEach(p => {
@@ -1443,12 +1603,14 @@ function drawRows() {
     const body = document.createElement('div');
     const n = document.createElement('div');
     n.className = 'n';
-    n.textContent = p.patients ? p.patients.name : 'Unnamed';
-    const r = document.createElement('div');
-    r.className = 'r';
-    r.textContent = p.reason || '';
+    n.textContent = p.patients ? p.patients.name : t.unnamed;
     body.appendChild(n);
-    if (p.reason) body.appendChild(r);
+    if (p.reason) {
+      const r = document.createElement('div');
+      r.className = 'r';
+      r.textContent = p.reason;
+      body.appendChild(r);
+    }
 
     row.appendChild(s);
     row.appendChild(body);
@@ -1460,41 +1622,41 @@ function drawRows() {
 
 async function callNext() {
   if (!docId) return;
-  const btn = document.getElementById('callBtn');
-  btn.disabled = true;
+  document.getElementById('callBtn').disabled = true;
   await fetch('/doctor/next/' + docId, { method: 'POST' });
   await loadQueue();
 }
 
 async function resetQueue() {
   if (!docId) return;
-  if (!confirm('Set the list back to the beginning?')) return;
+  if (!confirm(t.confirmReset)) return;
   await fetch('/doctor/reset/' + docId, { method: 'POST' });
   loadQueue();
 }
 
 async function openBrief(patientId) {
   if (!patientId) return;
+  openPatientId = patientId;
   document.getElementById('scrim').classList.add('open');
-  document.getElementById('bName').textContent = 'Loading';
+  document.getElementById('bName').textContent = t.loading;
   document.getElementById('bId').textContent = '';
-  document.getElementById('bSaid').textContent = 'Reading their messages';
+  document.getElementById('bSaid').textContent = t.reading;
   document.getElementById('bVisits').innerHTML = '';
   document.getElementById('bNotesWrap').style.display = 'none';
 
-  const res = await fetch('/doctor/patient-brief/' + patientId);
+  // the summary is written by the AI, so it has to be asked for in this language
+  const res = await fetch('/doctor/patient-brief/' + patientId + '?lang=' + lang);
   const data = await res.json();
   if (data.status !== 'success') {
-    document.getElementById('bName').textContent = 'Could not load';
-    document.getElementById('bSaid').textContent =
-        'This patient’s notes could not be opened. Try again in a moment.';
+    document.getElementById('bName').textContent = t.couldNotLoad;
+    document.getElementById('bSaid').textContent = t.briefFailed;
     return;
   }
 
   const p = data.patient;
   document.getElementById('bName').textContent = p.name;
   let line = p.phone;
-  if (p.age) line += ', age ' + p.age;
+  if (p.age) line += ', ' + t.age + ' ' + p.age;
   if (p.gender) line += ', ' + p.gender;
   document.getElementById('bId').textContent = line;
 
@@ -1510,28 +1672,54 @@ async function openBrief(patientId) {
   const box = document.getElementById('bVisits');
   const past = data.visit_history || [];
   if (!past.length) {
-    box.innerHTML = '<div class="visit x">No earlier visits on record.</div>';
+    const none = document.createElement('div');
+    none.className = 'visit x';
+    none.textContent = t.noEarlier;
+    box.appendChild(none);
     return;
   }
   past.forEach(v => {
     const el = document.createElement('div');
     el.className = 'visit';
-    const who = v.doctors ? v.doctors.name : '';
-    el.innerHTML = '<div class="d">' + v.appointment_date + '</div>' +
-                   '<div class="x">' + (v.reason || 'reason not recorded') +
-                   (who ? ' with ' + who : '') + ', ' + v.status + '</div>';
+
+    const d = document.createElement('div');
+    d.className = 'd';
+    d.textContent = v.appointment_date;
+
+    const x = document.createElement('div');
+    x.className = 'x';
+    let detail = v.reason || t.reasonMissing;
+    if (v.doctors) detail += ' ' + t.withDoctor + ' ' + v.doctors.name;
+    detail += ', ' + v.status;
+    x.textContent = detail;
+
+    el.appendChild(d);
+    el.appendChild(x);
     box.appendChild(el);
   });
 }
 
 function shutBrief(e) {
   if (e && e.target.id !== 'scrim') return;
+  openPatientId = null;
   document.getElementById('scrim').classList.remove('open');
 }
 
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') document.getElementById('scrim').classList.remove('open');
+  if (e.key === 'Escape') {
+    openPatientId = null;
+    document.getElementById('scrim').classList.remove('open');
+  }
 });
+
+let saved = 'bn';
+try { saved = localStorage.getItem('clinicLang') || 'bn'; } catch (e) {}
+lang = saved;
+t = STRINGS[saved];
+document.getElementById('langBn').classList.toggle('on', saved === 'bn');
+document.getElementById('langEn').classList.toggle('on', saved === 'en');
+document.documentElement.lang = saved;
+applyStaticLabels();
 
 loadDoctors();
 setInterval(loadQueue, 30000);
