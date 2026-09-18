@@ -1,7 +1,8 @@
 import os
+import time
 import httpx
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, BackgroundTasks
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from supabase import create_client
@@ -462,29 +463,49 @@ def save_message(session_id: str, role: str, content: str):
         print(f"[History save ERROR] {e}")
 
 
+# google's servers get overloaded from time to time and return 503, and the free
+# tier hands out 429s. both clear on their own, so a couple of short retries
+# turn what would be a dropped patient message into a slightly slower reply.
+AI_RETRY_WAITS = [2, 5]
+
+
 def ask_ai(session_id: str, patient_message: str) -> str:
     """the main brain call.
     loads history -> asks gemini -> saves both messages -> returns the reply
     """
     history = load_conversation_history(session_id)
 
-    chat_session = gemini_client.chats.create(
-        model=GEMINI_MODEL_NAME,
-        history=history,
-        config=types.GenerateContentConfig(
-            tools=CLINIC_TOOLS,
-            system_instruction=CLINIC_SYSTEM_PROMPT
-        )
-    )
+    last_error = None
+    for attempt in range(len(AI_RETRY_WAITS) + 1):
+        try:
+            chat_session = gemini_client.chats.create(
+                model=GEMINI_MODEL_NAME,
+                history=history,
+                config=types.GenerateContentConfig(
+                    tools=CLINIC_TOOLS,
+                    system_instruction=CLINIC_SYSTEM_PROMPT
+                )
+            )
+            response = chat_session.send_message(patient_message)
+            reply_text = response.text
 
-    response = chat_session.send_message(patient_message)
-    reply_text = response.text
+            # save both sides of the exchange
+            save_message(session_id, "user", patient_message)
+            save_message(session_id, "model", reply_text)
+            return reply_text
 
-    # save both sides of the exchange
-    save_message(session_id, "user", patient_message)
-    save_message(session_id, "model", reply_text)
+        except Exception as e:
+            last_error = e
+            text = str(e)
+            # only worth retrying when the service is busy, not for bad requests
+            retryable = "503" in text or "429" in text or "UNAVAILABLE" in text
+            if not retryable or attempt >= len(AI_RETRY_WAITS):
+                break
+            wait = AI_RETRY_WAITS[attempt]
+            print(f"[AI retry] attempt {attempt + 1} failed, waiting {wait}s: {text[:120]}")
+            time.sleep(wait)
 
-    return reply_text
+    raise last_error
 
 
 @app.post("/chat")
@@ -607,8 +628,26 @@ def verify_webhook(request: Request):
     return Response(content="Verification failed", status_code=403)
 
 
+def handle_patient_message(sender_phone: str, patient_text: str):
+    """runs after we have already answered meta, so we can take our time.
+    if the AI is unreachable even after retries, the patient still gets told
+    something rather than being left staring at a silent chat.
+    """
+    try:
+        reply_text = ask_ai(sender_phone, patient_text)
+        send_whatsapp_message(sender_phone, reply_text)
+    except Exception as e:
+        print(f"[AI failed for {sender_phone}] {e}")
+        send_whatsapp_message(
+            sender_phone,
+            "দুঃখিত, এই মুহূর্তে একটু সমস্যা হচ্ছে। অনুগ্রহ করে কিছুক্ষণ পর আবার "
+            "মেসেজ দিন।\n\n"
+            "Sorry, something is not working right now. Please message again in a few minutes."
+        )
+
+
 @app.post("/webhook")
-async def receive_whatsapp_message(request: Request):
+async def receive_whatsapp_message(request: Request, background_tasks: BackgroundTasks):
     """this is where every incoming whatsapp message lands.
     we pull out the sender + text, run it through the same AI brain we built,
     then send the reply back to them on whatsapp.
@@ -646,10 +685,12 @@ async def receive_whatsapp_message(request: Request):
         patient_text = message["text"]["body"]
         print(f"[Webhook] {sender_phone} says: {patient_text}")
 
-        # use the phone number as the session id, so each patient gets their own memory
-        reply_text = ask_ai(sender_phone, patient_text)
-
-        send_whatsapp_message(sender_phone, reply_text)
+        # answer meta immediately and do the slow part afterwards. meta gives a
+        # webhook only a few seconds before it assumes failure and retries, which
+        # would otherwise make the patient receive the same reply twice.
+        # the phone number doubles as the session id, so each patient keeps
+        # their own conversation.
+        background_tasks.add_task(handle_patient_message, sender_phone, patient_text)
         return {"status": "ok"}
 
     except Exception as e:
