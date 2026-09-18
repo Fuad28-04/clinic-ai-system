@@ -1195,7 +1195,11 @@ DOCTOR_PAGE_HTML = """
     .strip  { grid-area: strip; margin-bottom: 0; }
     .list   { grid-area: list; }
 
-    .scrim {
+    /* the mobile rule .scrim.open{display:flex} has higher specificity than a
+       plain .scrim, so it has to be overridden by name here - otherwise
+       align-items:flex-end shoves the panel to the bottom of a tall column
+       and it ends up below the fold. */
+    .scrim, .scrim.open {
       grid-area: brief; position: static; display: block;
       background: none; z-index: auto;
     }
@@ -1295,7 +1299,7 @@ async function loadDoctors() {
   (data.doctors || []).forEach(d => {
     const o = document.createElement('option');
     o.value = d.id;
-    o.textContent = d.name + ' \\u00b7 ' + d.specialty;
+    o.textContent = d.name + ' · ' + d.specialty;
     sel.appendChild(o);
   });
   if (data.doctors && data.doctors.length) loadQueue();
@@ -1332,7 +1336,7 @@ async function loadQueue() {
     btn.textContent = 'Call next patient';
   } else {
     document.getElementById('cue').textContent = 'Next in';
-    document.getElementById('nextNum').textContent = '\\u2014';
+    document.getElementById('nextNum').textContent = '—';
     document.getElementById('nextName').textContent =
         queue.length ? 'Everyone has been seen' : 'Nobody booked today';
     document.getElementById('nextWhy').textContent = '';
@@ -1349,7 +1353,7 @@ function drawInRoom(p) {
 
   card.style.display = '';
   document.getElementById('inroomName').textContent =
-      p.serial_number + '  \\u00b7  ' + (p.patients ? p.patients.name : 'Unnamed');
+      p.serial_number + '  ·  ' + (p.patients ? p.patients.name : 'Unnamed');
   document.getElementById('fuDays').value = '';
 
   // reflect whatever is already saved for this patient
@@ -1469,7 +1473,7 @@ async function openBrief(patientId) {
   if (data.status !== 'success') {
     document.getElementById('bName').textContent = 'Could not load';
     document.getElementById('bSaid').textContent =
-        'This patient\\u2019s notes could not be opened. Try again in a moment.';
+        'This patient’s notes could not be opened. Try again in a moment.';
     return;
   }
 
