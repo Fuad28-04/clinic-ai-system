@@ -182,6 +182,13 @@ finish and a start timestamp. Once there are at least two completed consultation
 estimate switches from the doctor's configured average to what is actually happening in the
 chamber. A doctor running long today produces longer estimates today.
 
+**Everything behind /doctor is password-protected.** Those routes expose allergies, chronic
+conditions and visit history, so they sit behind a sign-in that issues a signed, http-only
+session cookie lasting one clinic day. The secret is never put in a URL, because URLs survive in
+browser history, server logs and forwarded links. If the password or signing secret is missing
+from the environment the routes return 503 rather than falling open, and repeated wrong
+passwords from one address are throttled.
+
 **Follow-up reminders go out as approved templates.** WhatsApp only allows free-form messages
 within 24 hours of the patient's last message. A follow-up is weeks later, so the reminder is
 sent as a pre-approved template; once the patient replies, the normal conversational flow takes
@@ -254,11 +261,13 @@ of what was booked and what was dropped.
 | `POST /webhook` | Incoming WhatsApp messages |
 | `POST /chat` | Same AI flow, for testing without WhatsApp |
 | `POST /reset-chat` | Clears one conversation's history |
-| `GET /doctor` | Queue and brief interface |
+| `GET /doctor/login` | Sign-in form |
+| `GET /doctor` | Queue and brief interface (requires sign-in) |
 | `GET /doctor/queue/{id}` | Current serial and today's list |
 | `POST /doctor/next/{id}` | Advance the queue |
 | `POST /doctor/follow-up/{id}` | Set a return date for the patient in the room |
 | `GET /doctor/patient-brief/{id}` | History and AI summary |
+| `GET /doctor/logout` | Ends the session |
 | `POST /tasks/send-follow-ups` | Daily reminder run (secret-protected) |
 | `GET /tasks/follow-ups-due` | Who is due today, read only |
 
@@ -283,6 +292,10 @@ WHATSAPP_TOKEN=
 WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_VERIFY_TOKEN=
 CRON_SECRET=
+
+# the doctor page password, and a long random string used to sign the session
+CLINIC_PASSWORD=
+SESSION_SECRET=
 
 # only needed by the two helper scripts
 WHATSAPP_BUSINESS_ACCOUNT_ID=

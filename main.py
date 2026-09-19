@@ -1,8 +1,12 @@
 import os
 import time
+import hmac
+import hashlib
+import base64
 import httpx
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Request, Response, BackgroundTasks
+from fastapi import FastAPI, Request, Response, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from supabase import create_client
@@ -27,6 +31,13 @@ FOLLOW_UP_TEMPLATE_LANG = "bn"
 
 # a shared secret so only our scheduler can trigger the daily reminder run
 CRON_SECRET = os.getenv("CRON_SECRET", "change-me")
+
+# the doctor page and every endpoint behind it show patient health information,
+# so they sit behind a password. both of these MUST be set in the environment.
+CLINIC_PASSWORD = os.getenv("CLINIC_PASSWORD", "")
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+SESSION_COOKIE = "clinic_session"
+SESSION_HOURS = 12          # one clinic day, then sign in again
 
 # setting up Gemini AI (new SDK, old google.generativeai package is deprecated now)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -706,6 +717,158 @@ async def receive_whatsapp_message(request: Request, background_tasks: Backgroun
 # which moves the queue forward so waiting patients can see it.
 # ==========================================================
 
+# ==========================================================
+# DOCTOR AUTHENTICATION
+# everything under /doctor exposes patient health information, so it is all
+# behind a password. the session is a signed cookie rather than a secret in the
+# URL, because URLs end up in browser history, server logs and shared links.
+# ==========================================================
+
+# crude in-memory throttle so the password cannot be brute forced.
+# resets when the server restarts, which is fine for one clinic.
+_login_attempts = {}
+MAX_ATTEMPTS = 8
+ATTEMPT_WINDOW = 15 * 60     # seconds
+
+
+def _too_many_attempts(ip: str) -> bool:
+    now = time.time()
+    tries = [t for t in _login_attempts.get(ip, []) if now - t < ATTEMPT_WINDOW]
+    _login_attempts[ip] = tries
+    return len(tries) >= MAX_ATTEMPTS
+
+
+def _record_attempt(ip: str):
+    _login_attempts.setdefault(ip, []).append(time.time())
+
+
+def _sign(payload: str) -> str:
+    """signs a string with the server secret so it cannot be forged"""
+    digest = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def make_session_token() -> str:
+    """token is just an expiry time plus a signature over it"""
+    expires = str(int(time.time()) + SESSION_HOURS * 3600)
+    return f"{expires}.{_sign(expires)}"
+
+
+def session_is_valid(token: str) -> bool:
+    if not token or "." not in token:
+        return False
+    expires, signature = token.rsplit(".", 1)
+    # compare_digest avoids leaking information through timing
+    if not hmac.compare_digest(signature, _sign(expires)):
+        return False
+    try:
+        return int(expires) > time.time()
+    except ValueError:
+        return False
+
+
+def require_doctor(request: Request):
+    """guards every doctor endpoint. browsers get sent to the login page,
+    background fetches get a plain 401 so the page can react.
+    """
+    if not SESSION_SECRET or not CLINIC_PASSWORD:
+        raise HTTPException(
+            status_code=503,
+            detail="Server is missing CLINIC_PASSWORD or SESSION_SECRET",
+        )
+    if session_is_valid(request.cookies.get(SESSION_COOKIE, "")):
+        return True
+    raise HTTPException(status_code=401, detail="Sign in required")
+
+
+LOGIN_PAGE_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in</title>
+<link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  body { margin:0; min-height:100vh; display:flex; align-items:center;
+         justify-content:center; background:#E9EDEE; color:#16262B;
+         font-family:"Hind Siliguri", system-ui, sans-serif; }
+  .box { background:#fff; padding:32px 28px; border-radius:14px;
+         width:100%; max-width:340px; border-top:4px solid #0F6B5C; }
+  h1 { margin:0 0 4px; font-size:20px; }
+  p  { margin:0 0 22px; color:#5C6F74; font-size:14px; line-height:1.5; }
+  label { display:block; font-size:13px; color:#5C6F74; margin-bottom:6px; }
+  input { width:100%; padding:12px; font-size:16px; font-family:inherit;
+          border:1px solid #D6DEE0; border-radius:8px; box-sizing:border-box; }
+  button { width:100%; margin-top:16px; padding:13px; font-size:16px;
+           font-weight:600; font-family:inherit; border:none; border-radius:9px;
+           background:#0F6B5C; color:#fff; cursor:pointer; }
+  .err { margin-top:14px; color:#B3261E; font-size:14px; min-height:20px; }
+</style>
+</head>
+<body>
+  <form class="box" method="post" action="/doctor/login">
+    <h1>Chamber queue</h1>
+    <p>This page shows patient information. Please sign in.</p>
+    <label for="pw">Password</label>
+    <input id="pw" name="password" type="password" autocomplete="current-password" autofocus>
+    <button type="submit">Sign in</button>
+    <div class="err">__ERROR__</div>
+  </form>
+</body>
+</html>
+"""
+
+
+@app.get("/doctor/login")
+def login_page():
+    return Response(content=LOGIN_PAGE_HTML.replace("__ERROR__", ""),
+                    media_type="text/html")
+
+
+@app.post("/doctor/login")
+async def do_login(request: Request):
+    if not SESSION_SECRET or not CLINIC_PASSWORD:
+        return Response("Server is missing CLINIC_PASSWORD or SESSION_SECRET",
+                        status_code=503)
+
+    ip = request.client.host if request.client else "unknown"
+    if _too_many_attempts(ip):
+        return Response(
+            content=LOGIN_PAGE_HTML.replace("__ERROR__", "Too many attempts. Try again later."),
+            media_type="text/html", status_code=429,
+        )
+
+    form = await request.form()
+    supplied = str(form.get("password", ""))
+
+    if not hmac.compare_digest(supplied, CLINIC_PASSWORD):
+        _record_attempt(ip)
+        return Response(
+            content=LOGIN_PAGE_HTML.replace("__ERROR__", "Wrong password."),
+            media_type="text/html", status_code=401,
+        )
+
+    _login_attempts.pop(ip, None)
+    response = RedirectResponse(url="/doctor", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        make_session_token(),
+        max_age=SESSION_HOURS * 3600,
+        httponly=True,      # javascript cannot read it, so XSS cannot steal it
+        secure=True,        # only sent over https
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/doctor/logout")
+def logout():
+    response = RedirectResponse(url="/doctor/login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
 def get_or_create_queue(doctor_id: int, queue_date: str) -> dict:
     """gets today's queue row for a doctor, creating it if it's not there yet"""
     result = (
@@ -727,7 +890,7 @@ def get_or_create_queue(doctor_id: int, queue_date: str) -> dict:
 
 
 @app.get("/doctor/queue/{doctor_id}")
-def get_queue_info(doctor_id: int):
+def get_queue_info(doctor_id: int, _=Depends(require_doctor)):
     """returns the current queue state + today's patient list for one doctor"""
     today = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -759,7 +922,7 @@ def get_queue_info(doctor_id: int):
 
 
 @app.post("/doctor/next/{doctor_id}")
-def next_patient(doctor_id: int):
+def next_patient(doctor_id: int, _=Depends(require_doctor)):
     """doctor finished with the current patient - move to the next serial"""
     today = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -798,7 +961,7 @@ class FollowUpRequest(BaseModel):
 
 
 @app.post("/doctor/follow-up/{doctor_id}")
-def set_follow_up(doctor_id: int, request: FollowUpRequest):
+def set_follow_up(doctor_id: int, request: FollowUpRequest, _=Depends(require_doctor)):
     """the doctor sets a return date for the patient who is with them right now.
     done from the queue page, before pressing "call next patient".
     """
@@ -836,7 +999,7 @@ def set_follow_up(doctor_id: int, request: FollowUpRequest):
 
 
 @app.post("/doctor/reset/{doctor_id}")
-def reset_queue(doctor_id: int):
+def reset_queue(doctor_id: int, _=Depends(require_doctor)):
     """resets today's queue back to 0 - useful if something goes wrong"""
     today = datetime.now().strftime("%Y-%m-%d")
     try:
@@ -851,7 +1014,7 @@ def reset_queue(doctor_id: int):
 
 
 @app.get("/doctor/patient-brief/{patient_id}")
-def patient_brief(patient_id: int, lang: str = "bn"):
+def patient_brief(patient_id: int, lang: str = "bn", _=Depends(require_doctor)):
     """everything the doctor needs to know before calling this patient in:
     their basic info, past visits, and a short AI summary of what they told the assistant.
     """
@@ -1231,7 +1394,11 @@ DOCTOR_PAGE_HTML = """
   .hintbox { display: none; }
 
   /* ---------- language toggle ---------- */
-  .topbar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+  .topbar { display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 12px; }
+  .signout { color: var(--ink-soft); font-size: 14px; text-decoration: none;
+             padding: 6px 4px; }
+  .signout:hover { text-decoration: underline; }
   .langs { display: inline-flex; background: var(--surface);
            border-radius: 20px; padding: 3px; }
   .langs button {
@@ -1285,6 +1452,7 @@ DOCTOR_PAGE_HTML = """
 <div class="shell">
 
   <div class="topbar">
+    <a class="signout" href="/doctor/logout" id="lblSignOut"></a>
     <div class="langs">
       <button id="langBn" onclick="setLang('bn')">বাংলা</button>
       <button id="langEn" onclick="setLang('en')">English</button>
@@ -1411,6 +1579,8 @@ const STRINGS = {
     noReturn: 'পরবর্তী সাক্ষাৎ লাগবে না',
     badDays: '১ থেকে ৭৩০ এর মধ্যে দিন সংখ্যা লিখুন।',
     confirmReset: 'তালিকা কি শুরু থেকে সেট করবেন?',
+    signOut: 'সাইন আউট',
+    sessionOver: 'সেশন শেষ হয়ে গেছে। আবার সাইন ইন করুন।',
     age: 'বয়স',
   },
   en: {
@@ -1456,6 +1626,8 @@ const STRINGS = {
     noReturn: 'No return visit needed',
     badDays: 'Enter a number of days between 1 and 730.',
     confirmReset: 'Set the list back to the beginning?',
+    signOut: 'Sign out',
+    sessionOver: 'Your session has ended. Please sign in again.',
     age: 'age',
   }
 };
@@ -1503,11 +1675,25 @@ function applyStaticLabels() {
   put('lblCaveat', t.caveat);
   put('lblEarlier', t.earlier);
   put('lblClose', t.close);
+  put('lblSignOut', t.signOut);
   document.getElementById('fuDays').placeholder = t.daysPlaceholder;
 }
 
+// the session lasts one clinic day. when it lapses mid-shift every call starts
+// returning 401, so catch it in one place and send the doctor back to sign in
+// instead of letting the page quietly stop updating.
+async function api(url, options) {
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    alert(t.sessionOver);
+    window.location.href = '/doctor/login';
+    throw new Error('session expired');
+  }
+  return res;
+}
+
 async function loadDoctors() {
-  const res = await fetch('/doctors-list');
+  const res = await api('/doctors-list');
   const data = await res.json();
   const sel = document.getElementById('doc');
   sel.innerHTML = '';
@@ -1523,7 +1709,7 @@ async function loadDoctors() {
 async function loadQueue() {
   docId = document.getElementById('doc').value;
   if (!docId) return;
-  const res = await fetch('/doctor/queue/' + docId);
+  const res = await api('/doctor/queue/' + docId);
   const data = await res.json();
   if (data.status !== 'success') return;
 
@@ -1587,7 +1773,7 @@ function drawInRoom(p) {
 
 async function setFollowUp(days, chipEl) {
   if (!docId) return;
-  const res = await fetch('/doctor/follow-up/' + docId, {
+  const res = await api('/doctor/follow-up/' + docId, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ days: days })
@@ -1664,14 +1850,14 @@ function drawRows() {
 async function callNext() {
   if (!docId) return;
   document.getElementById('callBtn').disabled = true;
-  await fetch('/doctor/next/' + docId, { method: 'POST' });
+  await api('/doctor/next/' + docId, { method: 'POST' });
   await loadQueue();
 }
 
 async function resetQueue() {
   if (!docId) return;
   if (!confirm(t.confirmReset)) return;
-  await fetch('/doctor/reset/' + docId, { method: 'POST' });
+  await api('/doctor/reset/' + docId, { method: 'POST' });
   loadQueue();
 }
 
@@ -1686,7 +1872,7 @@ async function openBrief(patientId) {
   document.getElementById('bNotesWrap').style.display = 'none';
 
   // the summary is written by the AI, so it has to be asked for in this language
-  const res = await fetch('/doctor/patient-brief/' + patientId + '?lang=' + lang);
+  const res = await api('/doctor/patient-brief/' + patientId + '?lang=' + lang);
   const data = await res.json();
   if (data.status !== 'success') {
     document.getElementById('bName').textContent = t.couldNotLoad;
@@ -1771,7 +1957,7 @@ setInterval(loadQueue, 30000);
 
 
 @app.get("/doctors-list")
-def doctors_list():
+def doctors_list(_=Depends(require_doctor)):
     """small helper the doctor page uses to fill its dropdown"""
     try:
         result = supabase.table("doctors").select("id, name, specialty").eq(
@@ -1783,6 +1969,16 @@ def doctors_list():
 
 
 @app.get("/doctor")
-def doctor_page():
-    """the queue control page the doctor opens"""
+def doctor_page(request: Request):
+    """the queue control page the doctor opens.
+    handled separately from the API routes: a person in a browser should land on
+    the login form, not on a raw 401.
+    """
+    if not SESSION_SECRET or not CLINIC_PASSWORD:
+        return Response(
+            "Server is missing CLINIC_PASSWORD or SESSION_SECRET",
+            status_code=503,
+        )
+    if not session_is_valid(request.cookies.get(SESSION_COOKIE, "")):
+        return RedirectResponse(url="/doctor/login", status_code=303)
     return Response(content=DOCTOR_PAGE_HTML, media_type="text/html")
