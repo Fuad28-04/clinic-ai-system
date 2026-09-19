@@ -50,6 +50,11 @@ tells them the serial being seen now, their own serial, how many people are ahea
 estimated wait — computed from how long the doctor is actually taking today, not a fixed
 guess. Patients can leave home at the right time instead of sitting in the waiting room.
 
+**Works in Bangla or English, on both sides.** Patients get replies in whatever language they
+wrote in. The doctor's own page has a Bangla/English switch that changes every label on screen
+and also changes the language the AI writes its patient summaries in — the choice is remembered
+per device, so each person in the chamber sees it their way.
+
 **Briefs the doctor before the patient walks in.** Tapping a patient on the queue page shows
 their past visits and a short AI-written summary of what they told the assistant. The
 summariser is constrained to report only what the patient said — no diagnosis, no suggested
@@ -60,6 +65,74 @@ before they have even seen the patient.
 "1 week" / "15 days" / "1 month" and presses next. A daily job then messages those patients on
 the due date asking how they are and offering to book. Setting a follow-up is optional — the
 doctor can simply press next.
+
+---
+
+## Screenshots
+
+### Booking a visit in Bangla
+
+![Booking conversation in Bangla](screenshots/whatsapp-bangla-1.png)
+
+The patient writes *"amar jor, tai chintai achi"* — I have a fever and I am worried. The
+assistant reassures them, looks up the doctor table, and answers with what is actually there:
+the medicine specialist Dr. Rahman, today's sitting hours of 5 to 9 PM, and the 600 taka fee.
+It then asks for the three things it still needs before it can book — name, mobile number, and
+preferred date and time.
+
+![Booking confirmation in Bangla](screenshots/whatsapp-bangla-2.png)
+
+The patient sends all three in one line. The assistant resolves "Monday" to a real calendar
+date, books the appointment, and reads the details back: patient, number, doctor, date, time,
+fee, and the reason it recorded from the start of the conversation. Nothing in that summary was
+supplied twice — the complaint came from the first message, several turns earlier.
+
+### The same assistant in English
+
+![Conversation in English](screenshots/whatsapp-english.png)
+
+Nothing is configured per language. The assistant replies in whatever language the patient
+writes in, and everything else keeps working underneath: it checks that no doctor sits on a
+Friday, then looks up this patient's record and reminds them they already have an appointment
+booked for the next day rather than creating a duplicate. It also points anyone describing
+severe symptoms towards a hospital instead of trying to handle it through a booking flow.
+
+### The doctor's page
+
+<p align="center">
+  <img src="screenshots/doctor-1.png" width="45%">
+  <img src="screenshots/doctor-2.png" width="45%">
+</p>
+<p align="center">
+  <img src="screenshots/doctor-3.png" width="45%">
+  <img src="screenshots/doctor-4.png" width="45%">
+</p>
+<p align="center">
+  <img src="screenshots/doctor-5.png" width="45%">
+</p>
+
+One page runs the whole chamber, and it adapts to the screen it is opened on.
+
+**The queue.** Every booking carries a serial number. The page leads with who walks in next
+rather than the number currently being seen, because that is the thing the doctor cannot see
+for themselves — the patient in front of them is already in the room. One button advances the
+list; a strip underneath keeps the current serial and the number still waiting within reach.
+Patients who have been seen fade out, and the person currently in the room is highlighted.
+
+**The patient brief.** Tapping any name opens their record: standing notes kept by the clinic —
+allergies, chronic conditions, past surgery — then a short AI-written summary of what the
+patient told the assistant on WhatsApp, then their earlier visits. The standing notes sit above
+the summary deliberately, because a penicillin allergy outranks anything said today. The
+summary is constrained to report only what the patient actually said, and is labelled as
+background rather than a clinical opinion.
+
+**Follow-ups, set in the moment.** While the patient is still in the room the doctor taps
+1 week, 15 days, 1 month, 3 months, or types any number of days, and then calls the next
+patient. A daily job messages those patients on the due date. Setting one is optional — the
+doctor can simply move on.
+
+**Bangla or English.** The switch at the top changes every label on the page and also changes
+the language the AI writes its patient summaries in. The choice is remembered per device.
 
 ---
 
